@@ -1,0 +1,42 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: unified-ai-route
+  namespace: envoy-ai-gateway-system
+spec:
+  schema:
+    name: OpenAI
+  parentRefs:
+    - name: ai-gateway
+      namespace: envoy-ai-gateway-system
+      kind: Gateway
+  llmRequestCosts:
+    - metadataKey: llm-input-token-cost
+      type: InputToken
+      cost: 1
+    - metadataKey: llm-output-token-cost
+      type: OutputToken
+      cost: 1
+  rules:
+    - matches:
+        - headers:
+            - type: RegularExpression
+              name: x-ai-eg-model
+              value: ^or-.*
+      backendRefs:
+        - name: litellm-openrouter-backend
+          namespace: envoy-ai-gateway-system
+          kind: AIServiceBackend
+    - matches:
+        - headers:
+            - type: RegularExpression
+              name: x-ai-eg-model
+              value: ^(llama3.1|llama3.2|phi4|qwen2.5|deepseek-coder|nomic-embed-text|mistral).*
+      backendRefs:
+        - name: olla-local-backend
+          namespace: envoy-ai-gateway-system
+          kind: AIServiceBackend
+    - backendRefs:
+        - name: olla-local-backend
+          namespace: envoy-ai-gateway-system
+          kind: AIServiceBackend
