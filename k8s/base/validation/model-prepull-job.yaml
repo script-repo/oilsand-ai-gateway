@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-model-prepull
+  namespace: ai-local
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: default
+      containers:
+        - name: prepull
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              for pod in $(kubectl get pods -n ai-local -l app=ollama -o jsonpath='{.items[*].metadata.name}'); do
+                echo "Pulling models on ${pod}"
+                kubectl exec -n ai-local "${pod}" -- ollama pull llama3.1
+                kubectl exec -n ai-local "${pod}" -- ollama pull nomic-embed-text
+              done

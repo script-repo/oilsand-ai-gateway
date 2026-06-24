@@ -1,0 +1,30 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: olla-local-backend
+  namespace: envoy-ai-gateway-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+  backendRef:
+    name: olla-backend
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: litellm-openrouter-backend
+  namespace: envoy-ai-gateway-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+  backendRef:
+    name: litellm-backend
+    kind: Backend
+    group: gateway.envoyproxy.io
+  backendSecurityPolicyRef:
+    name: litellm-bsp
+    namespace: envoy-ai-gateway-system

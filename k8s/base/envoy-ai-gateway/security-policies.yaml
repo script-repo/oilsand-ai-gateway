@@ -1,0 +1,14 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: BackendSecurityPolicy
+metadata:
+  name: litellm-bsp
+  namespace: envoy-ai-gateway-system
+spec:
+  targetRefs:
+    - group: aigateway.envoyproxy.io
+      kind: AIServiceBackend
+      name: litellm-openrouter-backend
+  apiKey:
+    secretRef:
+      name: litellm-internal-key-secret
+      namespace: envoy-ai-gateway-system

@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: ai-cloud
+data:
+  config.yaml: |
+    model_list:
+      - model_name: or-deepseek-r1-free
+        litellm_params:
+          model: openrouter/deepseek/deepseek-r1:free
+          api_key: os.environ/OPENROUTER_API_KEY
+          api_base: https://openrouter.ai/api/v1
+          rpm: 20
+          tpm: 200000
+      - model_name: or-llama3.3-free
+        litellm_params:
+          model: openrouter/meta-llama/llama-3.3-70b-instruct:free
+          api_key: os.environ/OPENROUTER_API_KEY
+          api_base: https://openrouter.ai/api/v1
+          rpm: 20
+      - model_name: or-qwen3-coder-free
+        litellm_params:
+          model: openrouter/qwen/qwen3-coder-480b-a35b:free
+          api_key: os.environ/OPENROUTER_API_KEY
+          api_base: https://openrouter.ai/api/v1
+          rpm: 20
+      - model_name: or-deepseek-v4-flash-free
+        litellm_params:
+          model: openrouter/deepseek/deepseek-v4-flash:free
+          api_key: os.environ/OPENROUTER_API_KEY
+          api_base: https://openrouter.ai/api/v1
+          rpm: 20
+      - model_name: or-free-auto
+        litellm_params:
+          model: openrouter/openrouter/free
+          api_key: os.environ/OPENROUTER_API_KEY
+          api_base: https://openrouter.ai/api/v1
+          rpm: 20
+    router_settings:
+      routing_strategy: least-busy
+      num_retries: 2
+      timeout: 90
+      redis_host: redis-svc.ai-cloud.svc.cluster.local
+      redis_port: 6379
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      allowed_models:
+        - or-deepseek-r1-free
+        - or-llama3.3-free
+        - or-qwen3-coder-free
+        - or-deepseek-v4-flash-free
+        - or-free-auto
