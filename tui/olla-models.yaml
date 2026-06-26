@@ -1,0 +1,245 @@
+# Olla Model Unification Configuration  (oilsand-ai-gateway override)
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Olla's request router (handler_proxy.go -> extractRequiredCapabilities) demands
+# the capability strings "function_calling", "tools" and "code" for agentic
+# clients (Crush, etc. send a `tools` array and a code-ish system prompt). But
+# Olla's stock model unifier only ever emits strings like "code-generation",
+# "chat", "instruction-following" - never the exact tokens the router checks.
+# Worse, Ollama's /api/tags exposes no model "type", so the unifier's
+# type_capabilities never apply to Ollama models; ONLY name_patterns do.
+#
+# Result with the stock config: NO Ollama model can satisfy a tools/code request,
+# so olla logs "No models found with required capabilities" and falls back to
+# routing anyway. Traffic flows but every agentic call WARNs.
+#
+# This override (loaded via $OLLA_CONFIG_DIR/models.yaml or ./models.yaml) adds
+# name_patterns that emit the router's exact tokens (function_calling, tools,
+# code) for the general chat-model families this pool runs, so capability-based
+# routing matches cleanly and the warnings stop.
+#
+# To add a model family, extend the "tool/function-calling capable" pattern below.
+version: "1.0"
+
+model_extraction:
+  family_patterns:
+    - pattern: "^(mistral|mixtral)[-_]?(.+)"
+      family_group: 1
+      variant_group: 2
+      description: "Mistral and Mixtral models"
+    - pattern: "^(llama|gemma|phi|qwen)[-_]?(\\d+(?:\\.\\d+)?)"
+      family_group: 1
+      variant_group: 2
+      description: "Common families with version numbers"
+    - pattern: "^[^/]+/(phi|llama|gemma|qwen|mistral)[-_]?(\\d+(?:\\.\\d+)?)"
+      family_group: 1
+      variant_group: 2
+      description: "Models with publisher prefix"
+    - pattern: "^(codellama|starcoder|vicuna|falcon|yi)[-_]?(\\d+[bB]?)"
+      family_group: 1
+      variant_group: 2
+      description: "Code and specialised models"
+    - pattern: "^(gpt)[-_]?(2|j|neox)?"
+      family_group: 1
+      variant_group: 2
+      description: "GPT variants"
+    - pattern: "^(deepseek)[-_]?(.+)?"
+      family_group: 1
+      variant_group: 2
+      description: "DeepSeek models"
+
+  architecture_mappings:
+    phi3: phi
+    "phi3.5": phi
+    phi4: phi
+    llama: llama
+    llama2: llama
+    llama3: llama
+    "llama3.1": llama
+    "llama3.2": llama
+    "llama3.3": llama
+    gemma: gemma
+    gemma2: gemma
+    gemma3: gemma
+    mistral: mistral
+    mixtral: mixtral
+    qwen: qwen
+    qwen2: qwen
+    "qwen2.5": qwen
+    qwen3: qwen
+    deepseek: deepseek
+    yi: yi
+    starcoder: starcoder
+    codellama: codellama
+    vicuna: vicuna
+    falcon: falcon
+    gpt2: gpt2
+    gptj: gptj
+    gptneox: gptneox
+    bloom: bloom
+    opt: opt
+    mpt: mpt
+
+  family_aliases:
+    llama3: llama
+    "llama3.2": llama
+    "llama3.3": llama
+    llama4: llama
+    gemma2: gemma
+    gemma3: gemma
+    phi3: phi
+    "phi3.5": phi
+    phi4: phi
+    qwen2: qwen
+    "qwen2.5": qwen
+    qwen3: qwen
+    deepseek2: deepseek
+    devstral: mistral
+
+  publisher_mappings:
+    llama: meta
+    codellama: meta
+    gemma: google
+    phi: microsoft
+    mistral: mistral
+    mixtral: mistral
+    qwen: alibaba
+    yi: 01-ai
+    deepseek: deepseek
+    starcoder: bigcode
+    falcon: tii
+    vicuna: lmsys
+    bloom: bigscience
+    opt: meta
+    gpt2: openai
+    gptj: eleutherai
+    gptneox: eleutherai
+
+quantization:
+  mappings:
+    Q4_K_M: q4km
+    Q4_K_S: q4ks
+    Q3_K_L: q3kl
+    Q3_K_M: q3km
+    Q3_K_S: q3ks
+    Q5_K_M: q5km
+    Q5_K_S: q5ks
+    Q6_K: q6k
+    Q2_K: q2k
+    Q4_0: q4
+    Q4_1: q4_1
+    Q5_0: q5
+    Q5_1: q5_1
+    Q8_0: q8
+    F16: f16
+    FP16: f16
+    F32: f32
+    FP32: f32
+    BF16: bf16
+    GPTQ_4BIT: gptq4
+    GPTQ-4BIT: gptq4
+    AWQ_4BIT: awq4
+    AWQ-4BIT: awq4
+    INT8: int8
+    INT4: int4
+    Q4_K_XL: q4kxl
+
+capabilities:
+  # Capabilities by model type. Olla only fills these when the backend reports a
+  # model "type" (e.g. OpenAI-compatible cloud endpoints); Ollama does not, so the
+  # name_patterns below are what actually tag Ollama models. tools/function_calling
+  # are added here too for backends that DO report a type.
+  type_capabilities:
+    llm:
+      - text-generation
+      - chat
+      - completion
+      - tools
+      - function_calling
+      - code
+    vlm:
+      - text-generation
+      - vision
+      - multimodal
+      - image-understanding
+      - tools
+      - function_calling
+    embeddings:
+      - embeddings
+      - similarity
+      - vector-search
+    embedding:
+      - embeddings
+      - similarity
+      - vector-search
+
+  # Capabilities inferred from model names (substring, case-insensitive regex).
+  name_patterns:
+    # Coder models: also emit the router's exact "code" token (not just
+    # "code-generation") plus tool/function-calling support.
+    - pattern: "(code|coder|codegen|starcoder)"
+      capabilities:
+        - code-generation
+        - programming
+        - code-completion
+        - code
+        - tools
+        - function_calling
+
+    - pattern: "(instruct|chat|assistant)"
+      capabilities:
+        - instruction-following
+        - chat
+        - tools
+        - function_calling
+        - code
+
+    - pattern: "(reasoning|think)"
+      capabilities:
+        - reasoning
+        - logic
+        - tools
+        - function_calling
+        - code
+
+    - pattern: "(math|mathstral)"
+      capabilities:
+        - mathematics
+        - problem-solving
+
+    # Vision models keep vision caps; tools are added by family match below if the
+    # family supports it (e.g. llama3.2-vision).
+    - pattern: "(vision|vlm|llava|bakllava)"
+      capabilities:
+        - vision
+        - multimodal
+        - image-understanding
+
+    # Tool/function-calling-capable general model families. This is the key fix:
+    # Ollama exposes no model type, so this name match is the only signal that lets
+    # agentic requests (tools + code) route to these models instead of WARNing and
+    # falling through. Extend this list as new model families are added to the pool.
+    - pattern: "(minimax|qwen|qwq|llama|mistral|mixtral|magistral|devstral|ministral|gemma|phi|deepseek|hermes|openhermes|dolphin|command|granite|gpt-oss|gptoss|gpt|smollm|olmo|nemotron|cogito|glm|aya|exaone|falcon|mpt|wizard|vicuna|zephyr|starling|solar|tulu|nous|yi)"
+      capabilities:
+        - tools
+        - function_calling
+        - code
+        - chat
+        - instruction-following
+
+  context_thresholds:
+    extended_context: 32000
+    long_context: 100000
+    ultra_long_context: 1000000
+
+special_rules:
+  preserve_family:
+    - nomic-bert
+    - deepseek-coder-v2
+  generic_names:
+    - model
+    - unknown
+    - test
+    - temp
+    - default

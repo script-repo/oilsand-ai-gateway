@@ -1,0 +1,13 @@
+# Normalize line endings. Shell scripts and the cloud-init template MUST stay LF
+# or the Rocky guest's bash chokes on CRLF.
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.tmpl text eol=lf
+*.go text eol=lf
+
+# Treat built binaries as binary (should be gitignored anyway).
+*.exe binary

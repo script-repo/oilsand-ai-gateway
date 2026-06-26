@@ -401,6 +401,38 @@ scripts/deploy-ollama-pool.py --yes \
 
 Use `--dry-run` to print the generated manifests without applying them.
 
+## 11a. VM (AHV) deployment - Patterns A and B
+
+For a non-Kubernetes path that installs Olla/Ollama natively on a Rocky Linux VM,
+`scripts/nutanix_olla_vm.py` drives the full flow against Prism Central:
+
+1. Finds the Rocky Linux image, target cluster, and subnet on Prism Central (v4 API).
+2. Creates a VM (default 8 vCPU / 12 GiB RAM / 50 GiB disk) with a cloud-init script that
+   sets the `rocky` user password to `Nutanix/4u` and grows the root filesystem.
+3. SSHes into the guest (password auth) and runs a native installer as a systemd service:
+   - Pattern A: `scripts/remote/install-olla.sh` (Olla on `:40114`).
+   - Pattern B: `scripts/remote/install-ollama.sh` (Ollama on `:11434`) + `ollama pull <model>`,
+     then registers the worker with an existing Olla by rewriting its endpoint list and
+     restarting the service.
+4. Prints a JSON report covering service readiness (and, for Pattern B, model presence and
+   Olla registration).
+
+Prerequisites:
+
+- `pip install -r requirements.txt` (`requests`, `paramiko`).
+- `PRISM_CENTRAL_URL`, `PRISM_USER`, `PRISM_PASSWORD` exported in the environment.
+- Direct L3 reachability from where you run the script to the VM's subnet (for SSH).
+
+```bash
+# Pattern A
+scripts/nutanix_olla_vm.py pattern-a --vm-name olla-gateway-01
+
+# Pattern B (defaults to registering with the Pattern A Olla)
+scripts/nutanix_olla_vm.py pattern-b --vm-name ollama-worker-01 --model rnj-1
+```
+
+Use `--dry-run` to inspect the generated VM create body and cloud-init before provisioning.
+
 ## 12. Production hardening checklist
 
 - Replace all example Secret manifests with externally managed secrets.
