@@ -1,0 +1,75 @@
+# GoReleaser config for the oilsand-ai-gateway TUI.
+# Docs: https://goreleaser.com
+#
+# The Go module lives in ./tui, so the build points there. Each archive bundles
+# the Nutanix helper (scripts/nutanix_olla_vm.py) and the remote installers next
+# to the binary, so the TUI's vmScriptPath() resolves "<dir>/scripts/..." at
+# runtime. Python 3 + scripts/requirements (requests, paramiko) are an optional
+# prerequisite, only needed for the Nutanix deploy/delete features.
+version: 2
+
+project_name: oilsand-tui
+
+before:
+  hooks:
+    - go -C tui mod tidy
+
+builds:
+  - id: oilsand-tui
+    dir: tui
+    main: .
+    binary: oilsand-tui
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    ids:
+      - oilsand-tui
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    # Plain globs preserve their path inside the archive, so the helper lands at
+    # <archive>/scripts/... next to the binary (what vmScriptPath() expects).
+    files:
+      - scripts/nutanix_olla_vm.py
+      - scripts/remote/*
+      - scripts/requirements-tui.txt
+      - requirements.txt
+      - README.md
+      - DEPLOYMENT.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "{{ .ProjectName }} {{ .Version }}"

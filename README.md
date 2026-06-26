@@ -133,6 +133,31 @@ stack — **Bubble Tea** (runtime), **Huh** (modal forms), **Bubbles** (`list`, 
 `progress`, `textarea`, `viewport`, `spinner`), **Lip Gloss** (styling/layout) and **Glamour**
 (markdown rendering for streamed chat replies).
 
+### Install (prebuilt binaries)
+
+Prebuilt binaries for Windows, Linux and macOS (amd64 + arm64) are published on the
+[GitHub Releases](https://github.com/script-repo/oilsand-ai-gateway/releases) page. Each
+archive contains `oilsand-tui` plus the bundled `scripts/` helpers, so Nutanix deploy works
+out of the box. One-line installers:
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.ps1 | iex
+```
+
+> **Optional prerequisite:** the Nutanix deploy/delete features shell out to
+> `scripts/nutanix_olla_vm.py`, which needs **Python 3** and `pip install -r requirements.txt`
+> (`requests`, `paramiko`). Everything else (gateway, pool, models, chat, load) works without
+> Python. Point the TUI at a custom interpreter or script path with the `OILSAND_PYTHON` and
+> `OILSAND_VM_SCRIPT` environment variables.
+
+### Build from source
+
 ```bash
 # build (Go 1.23+); produces tui/oilsand-tui(.exe)
 cd tui
@@ -142,6 +167,10 @@ go build -o oilsand-tui .
 ./oilsand-tui --gateway http://10.42.156.22:40114 \
     --ssh-user rocky --ssh-password 'Nutanix/4u'
 ```
+
+Tagging a release (`git tag v0.1.0 && git push origin v0.1.0`) triggers the GoReleaser
+workflow (`.github/workflows/release.yml`), which cross-compiles all six OS/arch targets and
+uploads the archives + checksums to GitHub Releases.
 
 The layout is a **left sidebar (menu) + content pane** master/detail. The sidebar is the home
 base; pick a section, then press `Enter` to focus its content and `Esc` to come back to the menu.
