@@ -79,11 +79,24 @@ func vmsCmd(cfg *PCConfig) tea.Cmd {
 	return func() tea.Msg {
 		pc := NewPCClient(cfg)
 		vms, err := pc.ListVMs()
-		clusters := pc.ClusterNames()
-		images := pc.ImageNames()
-		subnets := pc.SubnetNames()
-		return vmsMsg{vms: vms, clusters: clusters, images: images, subnets: subnets, err: err}
+		clusters, cerr := pc.ClusterNames()
+		images, ierr := pc.ImageNames()
+		subnets, serr := pc.SubnetNames()
+		return vmsMsg{
+			vms: vms, clusters: clusters, images: images, subnets: subnets,
+			err:          err,
+			placementErr: firstErr(cerr, ierr, serr),
+		}
 	}
+}
+
+func firstErr(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // streaming readers -----------------------------------------------------------

@@ -212,13 +212,21 @@ func (m *model) openNutanixCfg() tea.Cmd {
 		),
 		huh.NewGroup(
 			huh.NewNote().Title("Image & placement").
-				Description("Picked from the live Prism Central inventory (type to filter; falls back to free text if PC isn't reachable yet)."),
+				Description(fmt.Sprintf("Live from Prism Central: %d images, %d clusters, %d subnets. "+
+					"If a count is 0, PC wasn't reachable — set the PC fields above, save, then reopen to get dropdowns.",
+					len(m.images), len(m.clusters), len(m.subnets))),
 			selectOrInput("Image name", "disk image to clone", m.images, &m.fImage),
 			selectOrInput("Cluster", "target cluster", m.clusters, &m.fCluster),
 			selectOrInput("Subnet", "target subnet", m.subnets, &m.fSubnet),
 		),
 	).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme())
-	return m.form.Init()
+	cmd := m.form.Init()
+	// Refresh PC inventory in the background when something's missing so the
+	// counts/notice update and the next open offers dropdowns.
+	if m.pcCfg != nil && (len(m.clusters) == 0 || len(m.images) == 0 || len(m.subnets) == 0) {
+		return tea.Batch(cmd, vmsCmd(m.pcCfg))
+	}
+	return cmd
 }
 
 // openHermesCfg builds the Hermes gateway / Telegram settings modal. These

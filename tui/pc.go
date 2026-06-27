@@ -174,98 +174,56 @@ func (c *PCClient) ListVMs() ([]VM, error) {
 	return vms, nil
 }
 
-func (c *PCClient) ClusterNames() []string {
+// listNames runs a v4 "list" GET and returns the .data[].name values. It
+// surfaces HTTP/transport errors (instead of swallowing them) so the caller can
+// tell "PC said there are none" apart from "the query failed".
+func (c *PCClient) listNames(path string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.base+"/api/clustermgmt/v4.2/config/clusters?$limit=50", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	c.cfg.authHeader(req)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer resp.Body.Close()
-	var out struct {
-		Data []struct {
-			Name string `json:"name"`
-		} `json:"data"`
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	if json.NewDecoder(resp.Body).Decode(&out) != nil {
-		return nil
-	}
-	var names []string
-	for _, c := range out.Data {
-		if c.Name != "" && strings.ToUpper(c.Name) != "UNNAMED" {
-			names = append(names, c.Name)
-		}
-	}
-	return names
-}
-
-// ImageNames lists the names of DISK images on Prism Central (ISO images are
-// skipped since deploys clone a disk image). Returns nil on any error so the
-// settings form falls back to free-text entry.
-func (c *PCClient) ImageNames() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.base+"/api/vmm/v4.2/content/images?$limit=100", nil)
-	c.cfg.authHeader(req)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
 	var out struct {
 		Data []struct {
 			Name string `json:"name"`
 			Type string `json:"type"`
 		} `json:"data"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&out) != nil {
-		return nil
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
 	}
 	var names []string
-	for _, img := range out.Data {
-		if img.Name == "" || strings.EqualFold(img.Type, "ISO_IMAGE") {
+	for _, d := range out.Data {
+		if d.Name == "" || strings.EqualFold(d.Name, "UNNAMED") || strings.EqualFold(d.Type, "ISO_IMAGE") {
 			continue
 		}
-		names = append(names, img.Name)
+		names = append(names, d.Name)
 	}
-	return names
+	return names, nil
 }
 
-// SubnetNames lists the names of subnets on Prism Central. Returns nil on any
-// error so the settings form falls back to free-text entry.
-func (c *PCClient) SubnetNames() []string {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.base+"/api/networking/v4.2/config/subnets?$limit=100", nil)
-	c.cfg.authHeader(req)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	var out struct {
-		Data []struct {
-			Name string `json:"name"`
-		} `json:"data"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&out) != nil {
-		return nil
-	}
-	var names []string
-	for _, s := range out.Data {
-		if s.Name != "" {
-			names = append(names, s.Name)
-		}
-	}
-	return names
+func (c *PCClient) ClusterNames() ([]string, error) {
+	return c.listNames("/api/clustermgmt/v4.2/config/clusters?$limit=50")
+}
+
+// ImageNames lists the names of DISK images on Prism Central (ISO images are
+// skipped since deploys clone a disk image).
+func (c *PCClient) ImageNames() ([]string, error) {
+	return c.listNames("/api/vmm/v4.2/content/images?$limit=100")
+}
+
+// SubnetNames lists the names of subnets on Prism Central.
+func (c *PCClient) SubnetNames() ([]string, error) {
+	return c.listNames("/api/networking/v4.2/config/subnets?$limit=100")
 }
 
 func summarizeVM(r rawVM) VM {

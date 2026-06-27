@@ -116,6 +116,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = "Prism Central query failed: " + msg.err.Error()
 			return m, nil
 		}
+		if msg.placementErr != nil {
+			m.notice = "PC inventory query failed (deploy dropdowns unavailable): " + msg.placementErr.Error()
+		}
 		m.vms = msg.vms
 		m.refreshVMs()
 		return m, nil

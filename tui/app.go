@@ -372,11 +372,12 @@ type modelsMsg struct {
 	err    error
 }
 type vmsMsg struct {
-	vms      []VM
-	clusters []string
-	images   []string
-	subnets  []string
-	err      error
+	vms          []VM
+	clusters     []string
+	images       []string
+	subnets      []string
+	err          error
+	placementErr error // non-nil if the cluster/image/subnet queries failed
 }
 type chatEvMsg ChatEvent
 type pullEvMsg PullEvent
