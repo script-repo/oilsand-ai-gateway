@@ -330,7 +330,11 @@ func newGlamour(width int) *glamour.TermRenderer {
 	if width < 20 {
 		width = 20
 	}
-	g, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(width))
+	// Use a fixed dark style rather than WithAutoStyle: auto-style probes the
+	// terminal background (an OSC/cursor-position query) every time this runs —
+	// including on each window resize — and the reply leaks into focused inputs
+	// over SSH / serial consoles.
+	g, _ := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(width))
 	return g
 }
 

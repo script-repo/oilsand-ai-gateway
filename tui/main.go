@@ -15,6 +15,16 @@ import (
 )
 
 func main() {
+	// Avoid probing the terminal for its background color. termenv (via Glamour's
+	// auto-style and Lip Gloss) otherwise sends an OSC/cursor-position query and
+	// reads the reply from stdin; over SSH and serial/VM consoles that reply isn't
+	// consumed cleanly and leaks into the focused input as artifacts like
+	// "[48;1R", corrupting the gateway URL / PC host. Declaring the background via
+	// COLORFGBG makes termenv skip the query entirely.
+	if os.Getenv("COLORFGBG") == "" {
+		_ = os.Setenv("COLORFGBG", "15;0") // light text on a dark background
+	}
+
 	// Headless subcommand: rewrite the gateway's olla.yaml so its load balancer
 	// spreads traffic (least-connections) instead of pinning to the first
 	// endpoint, then restart Olla. Reuses the same SSH path as the TUI.
