@@ -25,11 +25,12 @@ type keyMap struct {
 	Console   key.Binding
 	ConsoleGW key.Binding
 
-	Deploy   key.Binding
-	Worker   key.Binding
-	NextName key.Binding
-	Delete   key.Binding
-	EditCfg  key.Binding
+	Deploy    key.Binding
+	Worker    key.Binding
+	OllaLocal key.Binding
+	NextName  key.Binding
+	Delete    key.Binding
+	EditCfg   key.Binding
 
 	Token      key.Binding
 	ClearToken key.Binding
@@ -63,6 +64,7 @@ func newKeyMap() keyMap {
 		ConsoleGW:  key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "ssh gateway")),
 		Deploy:     key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "deploy gateway")),
 		Worker:     key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "deploy worker")),
+		OllaLocal:  key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "install Olla here")),
 		NextName:   key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next name")),
 		Delete:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "delete VM")),
 		EditCfg:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "settings")),

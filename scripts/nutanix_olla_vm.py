@@ -105,11 +105,20 @@ def save_state(state: dict[str, Any]) -> None:
 
 
 # --- Prism Central v4 REST client -------------------------------------------
+# Nutanix PCs serve different v4 minor versions: pc.2024.x commonly tops out at
+# v4.0/v4.1 while newer builds add v4.2. Paths below are written at v4.2 and the
+# client falls back to older minors on a 404, caching the working minor per
+# namespace so we only probe once.
+API_VERSIONS = ("v4.2", "v4.1", "v4.0")
+_NS_VER_RE = re.compile(r"^/([a-z]+)/(v4\.\d+)(?=/|$)")
+
+
 class PrismClient:
     def __init__(self, base_url: str, user: str | None = None, password: str | None = None,
                  verify: bool = False, api_key: str | None = None):
         self.base = base_url.rstrip("/")
         self.session = requests.Session()
+        self._api_ver: dict[str, str] = {}
         self.api_key = api_key
         if api_key:
             # Prism Central v4 API-key auth (e.g. the key used by the Nutanix MCP).
@@ -125,9 +134,32 @@ class PrismClient:
             except Exception:
                 pass
 
+    def _send(self, method: str, path: str, headers: dict, *,
+              body: dict | None = None, params: dict | None = None):
+        """Send a request, substituting the v4 minor version in the path and
+        falling back to older minors on a 404. The working minor is cached per
+        API namespace (e.g. 'vmm', 'clustermgmt') so subsequent calls skip the
+        probe and a genuine not-found isn't retried needlessly."""
+        m = _NS_VER_RE.match(path)
+        if not m:
+            return self.session.request(method, f"{self.base}/api{path}",
+                                        headers=headers, json=body, params=params, timeout=60)
+        ns = m.group(1)
+        candidates = [self._api_ver[ns]] if ns in self._api_ver else list(API_VERSIONS)
+        resp = None
+        for i, ver in enumerate(candidates):
+            p = path[:m.start(2)] + ver + path[m.end(2):]
+            resp = self.session.request(method, f"{self.base}/api{p}",
+                                        headers=headers, json=body, params=params, timeout=60)
+            if resp.status_code == 404 and ns not in self._api_ver and i < len(candidates) - 1:
+                continue  # this minor isn't served; try an older one
+            if resp.status_code != 404:
+                self._api_ver[ns] = ver  # remember the minor this PC actually serves
+            break
+        return resp
+
     def request(self, method: str, path: str, *, body: dict | None = None, params: dict | None = None,
                 extra_headers: dict | None = None) -> dict:
-        url = f"{self.base}/api{path}"
         headers = {
             "Accept": "application/json",
             "NTNX-Request-Id": str(uuid.uuid4()),
@@ -138,7 +170,7 @@ class PrismClient:
             headers["Content-Type"] = "application/json"
         if extra_headers:
             headers.update(extra_headers)
-        resp = self.session.request(method, url, headers=headers, json=body, params=params, timeout=60)
+        resp = self._send(method, path, headers, body=body, params=params)
         if resp.status_code >= 400:
             raise RuntimeError(f"{method} {path} -> HTTP {resp.status_code}: {resp.text[:800]}")
         if not resp.content:
@@ -147,9 +179,8 @@ class PrismClient:
 
     def get_with_etag(self, path: str) -> tuple[dict, str | None]:
         """GET an entity and return (data, etag-from-header) for If-Match calls."""
-        url = f"{self.base}/api{path}"
         headers = {"Accept": "application/json", "NTNX-Request-Id": str(uuid.uuid4())}
-        resp = self.session.request("GET", url, headers=headers, timeout=60)
+        resp = self._send("GET", path, headers)
         if resp.status_code >= 400:
             raise RuntimeError(f"GET {path} -> HTTP {resp.status_code}: {resp.text[:800]}")
         etag = resp.headers.get("ETag") or resp.headers.get("Etag")

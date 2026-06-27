@@ -382,9 +382,13 @@ func (m model) viewLoad() string {
 
 func (m model) viewNutanix() string {
 	if m.pcCfg == nil {
-		return dimStyle.Render("Prism Central is not configured.\nAdd PC_HOST / PC_API_KEY to the nutanix-v4-mcp entry in ~/.cursor/mcp.json.")
+		msg := "Prism Central is not configured (press e to set host + credentials,\nor add PC_HOST / PC_API_KEY to the nutanix-v4-mcp entry in ~/.cursor/mcp.json)."
+		if localOllaSupported() {
+			msg += "\n\nNo Nutanix needed: press o to install Olla on this server and connect to it."
+		}
+		return dimStyle.Render(msg)
 	}
-	busy := dimStyle.Render("g gateway · w worker · e settings · x delete · s ssh · n next-name · r refresh")
+	busy := dimStyle.Render("g gateway · w worker · o Olla here · e settings · x delete · s ssh · n next-name · r refresh")
 	if m.procBusy {
 		busy = m.spin.View() + " " + warnStyle.Render("running deploy/delete…")
 	}
@@ -471,7 +475,7 @@ func (m model) shortHelp() []key.Binding {
 	case secAgents:
 		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.EditCfg, m.km.Filter, m.km.Back}
 	case secNutanix:
-		mid = []key.Binding{m.km.Deploy, m.km.Worker, m.km.EditCfg, m.km.Delete, m.km.Console, m.km.NextName, m.km.Back}
+		mid = []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.Console, m.km.NextName, m.km.Back}
 	case secAccess:
 		mid = []key.Binding{m.km.Token, m.km.ClearToken, m.km.Back}
 	default:
@@ -487,7 +491,7 @@ func (m model) fullHelp() [][]key.Binding {
 		m.km.Pull, m.km.Browse, m.km.SetDef, m.km.SetModel,
 	}
 	access := []key.Binding{m.km.Console, m.km.ConsoleGW, m.km.AgentOpen, m.km.AgentDeploy, m.km.Token, m.km.ClearToken}
-	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.EditCfg, m.km.Delete, m.km.NextName}
+	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.NextName}
 	global := []key.Binding{m.km.Send, m.km.Help, m.km.Quit}
 	return [][]key.Binding{nav, actions, access, nutanix, global}
 }

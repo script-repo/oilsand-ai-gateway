@@ -525,6 +525,8 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, m.openDeploy("gateway")
 		case "w":
 			return m, m.openDeploy("worker")
+		case "o":
+			return m, m.startLocalOlla()
 		case "e":
 			return m, m.openNutanixCfg()
 		case "x", "delete":
@@ -1077,6 +1079,28 @@ func (m *model) startProc(args []string, label string) tea.Cmd {
 	return waitProc(m.procCh)
 }
 
+// startLocalOlla installs Olla on the machine running the TUI (typically the
+// Linux server the operator is SSH'd into), then connects to it on success. This
+// is an alternative to provisioning a Nutanix VM — no Prism Central required.
+func (m *model) startLocalOlla() tea.Cmd {
+	if m.procBusy {
+		m.notice = "a deploy/delete is already running"
+		return nil
+	}
+	if !localOllaSupported() {
+		m.notice = "installing Olla locally is Linux-only — run the TUI on the target server (e.g. over SSH)"
+		return nil
+	}
+	m.procBusy = true
+	m.localOllaPending = true
+	m.section = secNutanix
+	m.logLines = append(m.logLines, ">>> installing Olla on this server (sudo) — will connect on :"+LocalOllaPort+" when done")
+	m.renderLog()
+	m.procCh = make(chan ProcEvent, 128)
+	go RunLocalOllaInstall(m.procCh)
+	return waitProc(m.procCh)
+}
+
 func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 	if ev.Line != "" {
 		m.logLines = append(m.logLines, ev.Line)
@@ -1087,15 +1111,29 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 	}
 	if ev.Done {
 		m.procBusy = false
+		wasLocalOlla := m.localOllaPending
+		m.localOllaPending = false
 		if ev.Code == 0 {
 			m.logLines = append(m.logLines, "<<< done")
+			if wasLocalOlla {
+				gw := normalizeGateway("http://127.0.0.1:" + LocalOllaPort)
+				m.gateway = gw
+				_ = saveConnect(m.tokFile, gw, m.sshUser, m.sshPass)
+				m.notice = "Olla installed locally — connecting to " + gw
+				m.renderLog()
+				return m, connectCmd(gw)
+			}
 			m.notice = "deploy/delete finished"
 		} else {
 			m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))
-			m.notice = fmt.Sprintf("deploy/delete failed (rc=%d)", ev.Code)
+			if wasLocalOlla {
+				m.notice = fmt.Sprintf("local Olla install failed (rc=%d) — see Output; passwordless sudo may be required", ev.Code)
+			} else {
+				m.notice = fmt.Sprintf("deploy/delete failed (rc=%d)", ev.Code)
+			}
 		}
 		m.renderLog()
-		if m.pcCfg != nil {
+		if m.pcCfg != nil && !wasLocalOlla {
 			return m, vmsCmd(m.pcCfg)
 		}
 		return m, nil

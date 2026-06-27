@@ -87,6 +87,10 @@ func vmScriptPath() string {
 	return filepath.Join("..", "scripts", "nutanix_olla_vm.py")
 }
 
+// LocalOllaPort is the port the locally-installed Olla gateway listens on (must
+// match scripts/remote/install-olla.sh's OLLA_PORT default).
+const LocalOllaPort = "40114"
+
 // ProcEvent is a line of subprocess output or a terminal exit signal.
 type ProcEvent struct {
 	Line string
@@ -94,25 +98,9 @@ type ProcEvent struct {
 	Code int
 }
 
-// RunVMScript runs the python helper with the PC credentials injected via env and
-// streams stdout/stderr lines to ch. A final Done event carries the exit code.
-func RunVMScript(cfg *PCConfig, args []string, ch chan<- ProcEvent) {
-	defer close(ch)
-	script := vmScriptPath()
-	full := append([]string{script}, args...)
-	if cfg != nil {
-		full = append(full, "--prism-url", fmt.Sprintf("https://%s:%s", cfg.Host, cfg.Port))
-	}
-	cmd := exec.Command(pythonExe(), full...)
-	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
-	if cfg != nil {
-		if cfg.APIKey != "" {
-			cmd.Env = append(cmd.Env, "PRISM_API_KEY="+cfg.APIKey)
-		}
-		if cfg.User != "" {
-			cmd.Env = append(cmd.Env, "PRISM_USER="+cfg.User, "PRISM_PASSWORD="+cfg.Password)
-		}
-	}
+// streamProc starts cmd (with stdout+stderr merged), streams each output line to
+// ch, and sends a final Done event with the exit code. It does not close ch.
+func streamProc(cmd *exec.Cmd, ch chan<- ProcEvent) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		ch <- ProcEvent{Line: "failed to pipe stdout: " + err.Error(), Done: true, Code: 1}
@@ -136,6 +124,83 @@ func RunVMScript(cfg *PCConfig, args []string, ch chan<- ProcEvent) {
 		}
 	}
 	ch <- ProcEvent{Done: true, Code: code}
+}
+
+// localOllaSupported reports whether installing Olla on this machine is possible
+// (the installer is a bash/systemd script, so Linux only).
+func localOllaSupported() bool { return runtime.GOOS == "linux" }
+
+// localOllaScriptPath locates scripts/remote/install-olla.sh relative to this
+// binary (the installer copies the scripts/ tree next to the binary) or the repo.
+func localOllaScriptPath() string {
+	if p := os.Getenv("OILSAND_OLLA_SCRIPT"); p != "" {
+		return p
+	}
+	rel := filepath.Join("scripts", "remote", "install-olla.sh")
+	var roots []string
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		roots = append(roots, dir, filepath.Join(dir, ".."))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		roots = append(roots, wd, filepath.Join(wd, ".."))
+	}
+	for _, root := range roots {
+		p := filepath.Join(root, rel)
+		if _, err := os.Stat(p); err == nil {
+			abs, _ := filepath.Abs(p)
+			return abs
+		}
+	}
+	return rel
+}
+
+// RunLocalOllaInstall installs Olla on the machine running the TUI by executing
+// scripts/remote/install-olla.sh, streaming its output to ch. The script needs
+// root, so it runs under `sudo -n` unless we are already root; if passwordless
+// sudo isn't configured, sudo exits immediately with a clear message (rather
+// than hanging on a password prompt the TUI can't service).
+func RunLocalOllaInstall(ch chan<- ProcEvent) {
+	defer close(ch)
+	if !localOllaSupported() {
+		ch <- ProcEvent{Line: "local Olla install is only supported on Linux — run the TUI on the target server (e.g. over SSH)", Done: true, Code: 1}
+		return
+	}
+	script := localOllaScriptPath()
+	if _, err := os.Stat(script); err != nil {
+		ch <- ProcEvent{Line: "could not find install-olla.sh (" + err.Error() + "); set OILSAND_OLLA_SCRIPT", Done: true, Code: 1}
+		return
+	}
+	var cmd *exec.Cmd
+	if os.Geteuid() == 0 {
+		cmd = exec.Command("bash", script)
+	} else {
+		cmd = exec.Command("sudo", "-n", "bash", script)
+	}
+	cmd.Env = append(os.Environ(), "OLLA_PORT="+LocalOllaPort)
+	streamProc(cmd, ch)
+}
+
+// RunVMScript runs the python helper with the PC credentials injected via env and
+// streams stdout/stderr lines to ch. A final Done event carries the exit code.
+func RunVMScript(cfg *PCConfig, args []string, ch chan<- ProcEvent) {
+	defer close(ch)
+	script := vmScriptPath()
+	full := append([]string{script}, args...)
+	if cfg != nil {
+		full = append(full, "--prism-url", fmt.Sprintf("https://%s:%s", cfg.Host, cfg.Port))
+	}
+	cmd := exec.Command(pythonExe(), full...)
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
+	if cfg != nil {
+		if cfg.APIKey != "" {
+			cmd.Env = append(cmd.Env, "PRISM_API_KEY="+cfg.APIKey)
+		}
+		if cfg.User != "" {
+			cmd.Env = append(cmd.Env, "PRISM_USER="+cfg.User, "PRISM_PASSWORD="+cfg.Password)
+		}
+	}
+	streamProc(cmd, ch)
 }
 
 // NextName calls the helper synchronously to get the next free indexed name.

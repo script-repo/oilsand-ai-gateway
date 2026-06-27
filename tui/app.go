@@ -177,9 +177,10 @@ type model struct {
 	pullRows  []pullRow
 
 	// proc (deploy/delete)
-	procCh   chan ProcEvent
-	procBusy bool
-	logLines []string
+	procCh           chan ProcEvent
+	procBusy         bool
+	localOllaPending bool // the running proc is a local Olla install; connect on success
+	logLines         []string
 
 	// access
 	token   string

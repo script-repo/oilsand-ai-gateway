@@ -107,10 +107,12 @@ Sections:
   active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
   currently taking the most load.
 * **Nutanix** — Prism Central server + managed gateway/worker VMs (filterable list). `g` deploy a
-  gateway, `w` deploy a worker (auto-named, registered with the connected gateway), `n` show the
-  next free name, `r` refresh, `x` delete the selected VM. Deploys open a Huh modal, then run
-  `nutanix_olla_vm.py` as a subprocess and stream output into the log pane. The PC API key is read
-  at runtime from `~/.cursor/mcp.json` and never stored in code.
+  gateway, `w` deploy a worker (auto-named, registered with the connected gateway), `o` install
+  Olla on **this** server (no Nutanix VM — see below), `n` show the next free name, `r` refresh,
+  `x` delete the selected VM. Deploys open a Huh modal, then run `nutanix_olla_vm.py` as a
+  subprocess and stream output into the log pane. The PC API key is read at runtime from
+  `~/.cursor/mcp.json` and never stored in code. The client auto-negotiates the Prism Central v4
+  API version (it tries `v4.2`, then `v4.1`, then `v4.0`) so it works across PC releases.
 * **Access** — create/rotate a client API token (`t`/`X`); shows the OpenAI Base URL, token, model
   and a `curl` example.
 
@@ -123,6 +125,15 @@ runs. Gateway URL, SSH user and password can also be supplied up front via the `
 `OLLA_SSH_USER` and `OLLA_SSH_PASSWORD` environment variables (flags/env take precedence over the
 saved values). The VM password for Nutanix deploys is entered in the **Nutanix** settings form
 (`e`) — deploys are blocked until it is set.
+
+### Install Olla locally (no Nutanix VM)
+
+If you are running the TUI on the Linux box that should host the gateway (for example over
+SSH), press `o` in the **Nutanix** section to install Olla on that machine instead of
+provisioning a VM. This runs `scripts/remote/install-olla.sh` (via `sudo`) to install the Olla
+binary, write `/etc/olla/olla.yaml`, and start the `olla` systemd service on `:40114`; the TUI
+then connects to `http://127.0.0.1:40114` automatically. Linux only, and it needs passwordless
+`sudo` (or run the TUI as root) since the installer can't service an interactive password prompt.
 
 ## VM (AHV) deployment — Patterns A and B
 

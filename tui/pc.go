@@ -145,26 +145,66 @@ type nicNet struct {
 	} `json:"ipv4Info"`
 }
 
+// pcAPIVersions is the set of Nutanix v4 API minor versions we try, newest
+// first. Different Prism Central releases serve different minors: pc.2024.x
+// commonly tops out at v4.0/v4.1 while newer builds add v4.2. Calling a minor a
+// PC doesn't serve returns 404, so getVersioned walks this list and uses the
+// first that responds — instead of hardcoding v4.2 and silently getting nothing.
+var pcAPIVersions = []string{"v4.2", "v4.1", "v4.0"}
+
+// getVersioned performs a GET against pathTmpl (which must contain a single %s
+// for the API version), trying each supported minor in turn and returning the
+// body of the first non-404 response. A 404 means "this PC doesn't serve that
+// minor" so we fall through; any other 4xx/5xx (e.g. 401 auth) is returned
+// immediately since retrying another version won't help.
+func (c *PCClient) getVersioned(pathTmpl string) ([]byte, error) {
+	var lastErr error
+	for _, v := range pcAPIVersions {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+fmt.Sprintf(pathTmpl, v), nil)
+		c.cfg.authHeader(req)
+		req.Header.Set("Accept", "application/json")
+		resp, err := c.http.Do(req)
+		if err != nil {
+			cancel()
+			return nil, err // transport errors are version-independent: fail fast
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+			resp.Body.Close()
+			cancel()
+			lastErr = fmt.Errorf("HTTP 404 (API %s not served)", v)
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			resp.Body.Close()
+			cancel()
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		}
+		b, rerr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		cancel()
+		if rerr != nil {
+			return nil, rerr
+		}
+		return b, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no supported v4 API version found")
+	}
+	return nil, lastErr
+}
+
 func (c *PCClient) ListVMs() ([]VM, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.base+"/api/vmm/v4.2/ahv/config/vms?$limit=100", nil)
-	c.cfg.authHeader(req)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
+	body, err := c.getVersioned("/api/vmm/%s/ahv/config/vms?$limit=100")
 	if err != nil {
 		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("list vms %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var out struct {
 		Data []rawVM `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err
 	}
 	vms := make([]VM, 0, len(out.Data))
@@ -176,21 +216,12 @@ func (c *PCClient) ListVMs() ([]VM, error) {
 
 // listNames runs a v4 "list" GET and returns the .data[].name values. It
 // surfaces HTTP/transport errors (instead of swallowing them) so the caller can
-// tell "PC said there are none" apart from "the query failed".
-func (c *PCClient) listNames(path string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
-	c.cfg.authHeader(req)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
+// tell "PC said there are none" apart from "the query failed". pathTmpl must
+// contain a single %s for the API version (see getVersioned).
+func (c *PCClient) listNames(pathTmpl string) ([]string, error) {
+	body, err := c.getVersioned(pathTmpl)
 	if err != nil {
 		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var out struct {
 		Data []struct {
@@ -198,7 +229,7 @@ func (c *PCClient) listNames(path string) ([]string, error) {
 			Type string `json:"type"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, err
 	}
 	var names []string
@@ -212,18 +243,18 @@ func (c *PCClient) listNames(path string) ([]string, error) {
 }
 
 func (c *PCClient) ClusterNames() ([]string, error) {
-	return c.listNames("/api/clustermgmt/v4.2/config/clusters?$limit=50")
+	return c.listNames("/api/clustermgmt/%s/config/clusters?$limit=50")
 }
 
 // ImageNames lists the names of DISK images on Prism Central (ISO images are
 // skipped since deploys clone a disk image).
 func (c *PCClient) ImageNames() ([]string, error) {
-	return c.listNames("/api/vmm/v4.2/content/images?$limit=100")
+	return c.listNames("/api/vmm/%s/content/images?$limit=100")
 }
 
 // SubnetNames lists the names of subnets on Prism Central.
 func (c *PCClient) SubnetNames() ([]string, error) {
-	return c.listNames("/api/networking/v4.2/config/subnets?$limit=100")
+	return c.listNames("/api/networking/%s/config/subnets?$limit=100")
 }
 
 func summarizeVM(r rawVM) VM {
