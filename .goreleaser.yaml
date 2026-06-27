@@ -50,10 +50,8 @@ archives:
     files:
       - scripts/nutanix_olla_vm.py
       - scripts/remote/*
-      - scripts/requirements-tui.txt
       - requirements.txt
       - README.md
-      - DEPLOYMENT.md
 
 checksum:
   name_template: "checksums.txt"

@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: litellm-internal-key-secret
-  namespace: envoy-ai-gateway-system
-type: Opaque
-stringData:
-  apiKey: sk-litellm-internal-key-replace-me
