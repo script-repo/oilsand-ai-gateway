@@ -346,6 +346,9 @@ func hostFromURL(u string) string {
 type tuiSettings struct {
 	Token        string            `json:"olla_token"`
 	DefaultModel string            `json:"default_model"`
+	Gateway      string            `json:"gateway"`      // Olla gateway URL (set on first launch)
+	SSHUser      string            `json:"ssh_user"`     // SSH user for the gateway VM
+	SSHPass      string            `json:"ssh_password"` // SSH password for the gateway VM
 	Deploy       deploySettings    `json:"deploy"`
 	PC           pcOverride        `json:"prism_central"`
 	Agents       map[string]string `json:"agents"` // agent name -> deployed host
@@ -407,7 +410,9 @@ func deployDefaults() deploySettings {
 		MemoryGiB:      12,
 		DiskGiB:        50,
 		VMUser:         "rocky",
-		VMPassword:     "Nutanix/4u",
+		// No default VM password: it is supplied on first launch via the
+		// Nutanix settings form (or OILSAND_VM_PASSWORD for the CLI helper).
+		VMPassword: "",
 	}
 }
 
@@ -455,6 +460,17 @@ func loadToken(path string) string { return loadSettings(path).Token }
 func saveToken(path, token string) error {
 	s := loadSettings(path)
 	s.Token = token
+	return saveSettings(path, s)
+}
+
+// saveConnect persists the gateway connection entered on first launch so later
+// runs reconnect without re-prompting. The SSH password is stored in tui.json
+// (mode 0600) alongside the other service-account secrets.
+func saveConnect(path, gateway, sshUser, sshPass string) error {
+	s := loadSettings(path)
+	s.Gateway = gateway
+	s.SSHUser = sshUser
+	s.SSHPass = sshPass
 	return saveSettings(path, s)
 }
 

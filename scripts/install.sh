@@ -84,4 +84,81 @@ else
   info "run it directly:  $INSTALL_DIR/$BIN_NAME"
 fi
 
-info "done. Nutanix deploy also needs Python 3 + 'pip install -r requirements.txt' (optional)."
+# ---- interactive feature dependencies --------------------------------------
+# The Nutanix deploy feature shells out to Python (requests + paramiko); the
+# Console/Agents features shell out to the OpenSSH client. Put both in place.
+# System-package installs run non-interactively (sudo -n) so a piped installer
+# never hangs on a password prompt; if that's not possible we print the command.
+# Set OILSAND_SKIP_DEPS=1 to skip this section entirely.
+have() { command -v "$1" >/dev/null 2>&1; }
+
+if [ "${OILSAND_SKIP_DEPS:-0}" = "1" ]; then
+  info "skipping dependency setup (OILSAND_SKIP_DEPS=1)"
+else
+  SUDO=""
+  if [ "$(id -u)" -ne 0 ] && have sudo; then SUDO="sudo -n"; fi
+
+  PM=""
+  for c in apt-get dnf yum zypper pacman apk brew; do
+    if have "$c"; then PM="$c"; break; fi
+  done
+
+  pm_install() {
+    [ -n "$PM" ] || return 1
+    case "$PM" in
+      apt-get) $SUDO apt-get update -qq >/dev/null 2>&1; $SUDO apt-get install -y "$@" >/dev/null 2>&1 ;;
+      dnf)     $SUDO dnf install -y "$@" >/dev/null 2>&1 ;;
+      yum)     $SUDO yum install -y "$@" >/dev/null 2>&1 ;;
+      zypper)  $SUDO zypper --non-interactive install "$@" >/dev/null 2>&1 ;;
+      pacman)  $SUDO pacman -Sy --noconfirm "$@" >/dev/null 2>&1 ;;
+      apk)     $SUDO apk add "$@" >/dev/null 2>&1 ;;
+      brew)    brew install "$@" >/dev/null 2>&1 ;;
+    esac
+  }
+
+  case "$PM" in
+    apt-get)        PY_PKGS="python3 python3-venv python3-pip"; SSH_PKG="openssh-client" ;;
+    dnf|yum|zypper) PY_PKGS="python3 python3-pip";              SSH_PKG="openssh-clients" ;;
+    pacman)         PY_PKGS="python";                           SSH_PKG="openssh" ;;
+    apk)            PY_PKGS="python3 py3-pip";                  SSH_PKG="openssh-client" ;;
+    brew)           PY_PKGS="python";                           SSH_PKG="" ;; # ssh preinstalled on macOS
+    *)              PY_PKGS="python3";                          SSH_PKG="openssh-client" ;;
+  esac
+
+  # OpenSSH client (Console / Agents).
+  if have ssh; then
+    info "openssh client: ok"
+  elif [ -n "$SSH_PKG" ] && pm_install $SSH_PKG && have ssh; then
+    info "openssh client installed"
+  else
+    info "WARNING: openssh client not available (needed for Console/Agents)."
+    [ -n "$SSH_PKG" ] && info "  install it with:  $SUDO $PM install $SSH_PKG"
+  fi
+
+  # Python 3 (Nutanix deploy).
+  have python3 || pm_install $PY_PKGS || true
+
+  REQ="$INSTALL_DIR/requirements.txt"
+  VENV="$INSTALL_DIR/venv"
+  if have python3 && [ -f "$REQ" ]; then
+    info "setting up Python venv for Nutanix deploy ($VENV)"
+    if python3 -m venv "$VENV" >/dev/null 2>&1; then
+      "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+      if "$VENV/bin/python" -m pip install --quiet -r "$REQ" >/dev/null 2>&1; then
+        info "python deps installed (requests, paramiko); the TUI uses $VENV automatically"
+      else
+        info "WARNING: pip install failed; run:  $VENV/bin/python -m pip install -r $REQ"
+      fi
+    elif python3 -m pip install --quiet --user -r "$REQ" >/dev/null 2>&1; then
+      info "python deps installed to your user site (venv module unavailable)"
+    else
+      info "WARNING: could not install python deps automatically."
+      info "  install python3-venv (Debian/Ubuntu) and re-run, or:  python3 -m pip install -r $REQ"
+    fi
+  elif ! have python3; then
+    info "WARNING: python3 not found (needed for Nutanix deploy)."
+    info "  install Python 3, then:  python3 -m pip install -r $REQ"
+  fi
+fi
+
+info "done."

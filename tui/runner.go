@@ -11,9 +11,16 @@ import (
 	"strings"
 )
 
-// pythonExe picks an interpreter: $OILSAND_PYTHON, then python/python3 on PATH.
+// pythonExe picks an interpreter, in order of preference:
+//  1. $OILSAND_PYTHON (explicit override)
+//  2. the virtualenv the installer creates next to the binary (so the bundled
+//     requests/paramiko deps are always available without touching system Python)
+//  3. python/python3 (py on Windows) on PATH
 func pythonExe() string {
 	if p := os.Getenv("OILSAND_PYTHON"); p != "" {
+		return p
+	}
+	if p := bundledVenvPython(); p != "" {
 		return p
 	}
 	candidates := []string{"python", "python3"}
@@ -26,6 +33,25 @@ func pythonExe() string {
 		}
 	}
 	return "python"
+}
+
+// bundledVenvPython returns the path to the interpreter in a "venv" directory
+// alongside the binary (created by the installer), or "" if there isn't one.
+func bundledVenvPython() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(exe)
+	rel := []string{"venv", "bin", "python"}
+	if runtime.GOOS == "windows" {
+		rel = []string{"venv", "Scripts", "python.exe"}
+	}
+	p := filepath.Join(append([]string{dir}, rel...)...)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
 }
 
 // vmScriptPath locates scripts/nutanix_olla_vm.py relative to this binary's repo.

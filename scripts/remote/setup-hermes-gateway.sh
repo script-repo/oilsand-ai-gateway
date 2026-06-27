@@ -14,7 +14,7 @@
 # sudo for a boot-level root service.
 #
 # Required env:
-#   HERMES_OLLA_BASE   Olla OpenAI base, e.g. http://10.42.156.20:40114/olla/openai/v1
+#   HERMES_OLLA_BASE   Olla OpenAI base, e.g. http://gateway-host:40114/olla/openai/v1
 #   HERMES_OLLA_MODEL  default model, e.g. minimax-m3:cloud
 #   TELEGRAM_BOT_TOKEN BotFather token
 # Optional env:

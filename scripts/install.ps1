@@ -75,4 +75,68 @@ if (-not ($userPath -split ';' | Where-Object { $_ -eq $InstallDir })) {
 }
 
 Info "installed: $exe"
-Info "done. Nutanix deploy also needs Python 3 + 'pip install -r requirements.txt' (optional)."
+
+# ---- interactive feature dependencies --------------------------------------
+# Nutanix deploy shells out to Python (requests + paramiko); the Console/Agents
+# features shell out to the OpenSSH client. Best-effort setup so the install has
+# everything. Set $env:OILSAND_SKIP_DEPS = '1' to skip this section.
+function Have($name) { [bool](Get-Command $name -ErrorAction SilentlyContinue) }
+
+if ($env:OILSAND_SKIP_DEPS -eq '1') {
+  Info 'skipping dependency setup (OILSAND_SKIP_DEPS=1)'
+} else {
+  # OpenSSH client (Console / Agents).
+  if (Have ssh) {
+    Info 'openssh client: ok'
+  } else {
+    Info 'openssh client missing; attempting to add the Windows OpenSSH client capability'
+    try {
+      Add-WindowsCapability -Online -Name 'OpenSSH.Client~~~~0.0.1.0' -ErrorAction Stop | Out-Null
+      Info 'openssh client installed'
+    } catch {
+      if (Have winget) {
+        try { winget install -e --id Microsoft.OpenSSH.Beta --accept-source-agreements --accept-package-agreements | Out-Null } catch {}
+      }
+      if (-not (Have ssh)) {
+        Info 'WARNING: could not install the OpenSSH client (needed for Console/Agents).'
+        Info '  Enable it via Settings > System > Optional features > OpenSSH Client, or run as admin:'
+        Info '  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0'
+      }
+    }
+  }
+
+  # Resolve a Python launcher (install via winget if absent).
+  $py = $null
+  foreach ($cand in @('py', 'python', 'python3')) { if (Have $cand) { $py = $cand; break } }
+  if (-not $py) {
+    Info 'Python 3 missing; attempting install via winget'
+    if (Have winget) {
+      try { winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements | Out-Null } catch {}
+    }
+    foreach ($cand in @('py', 'python', 'python3')) { if (Have $cand) { $py = $cand; break } }
+  }
+
+  $req  = Join-Path $InstallDir 'requirements.txt'
+  $venv = Join-Path $InstallDir 'venv'
+  if ($py -and (Test-Path $req)) {
+    Info "setting up Python venv for Nutanix deploy ($venv)"
+    try {
+      & $py -m venv $venv
+      $vpy = Join-Path $venv 'Scripts\python.exe'
+      & $vpy -m pip install --quiet --upgrade pip | Out-Null
+      & $vpy -m pip install --quiet -r $req
+      if ($LASTEXITCODE -eq 0) {
+        Info "python deps installed (requests, paramiko); the TUI uses $venv automatically"
+      } else {
+        Info "WARNING: pip install failed; run:  `"$vpy`" -m pip install -r `"$req`""
+      }
+    } catch {
+      Info "WARNING: could not set up the Python venv ($_)."
+      Info "  Install Python 3, then:  $py -m pip install -r `"$req`""
+    }
+  } elseif (-not $py) {
+    Info 'WARNING: Python 3 not found (needed for Nutanix deploy). Install from https://www.python.org/downloads/'
+  }
+}
+
+Info 'done.'

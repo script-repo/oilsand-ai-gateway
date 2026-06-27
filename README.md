@@ -36,11 +36,19 @@ curl -fsSL https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main
 irm https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.ps1 | iex
 ```
 
-> **Optional prerequisite:** the Nutanix deploy/delete features shell out to
-> `scripts/nutanix_olla_vm.py`, which needs **Python 3** and `pip install -r requirements.txt`
-> (`requests`, `paramiko`). Everything else (gateway, pool, models, chat, load) works without
-> Python. Point the TUI at a custom interpreter or script path with the `OILSAND_PYTHON` and
-> `OILSAND_VM_SCRIPT` environment variables.
+The installers also set up everything the **interactive features** need (best-effort):
+
+> * **OpenSSH client** (for the Console/Agents sessions): checked, and installed via the
+>   platform package manager / Windows capability when missing.
+> * **Python 3 + a dedicated virtualenv** at `<install-dir>/venv` with `requests` and
+>   `paramiko` from `requirements.txt` (for Nutanix deploy/delete). The TUI auto-discovers
+>   this venv, so no `OILSAND_PYTHON` export is needed.
+>
+> System-package installs run non-interactively and never block a piped install; if a
+> dependency can't be installed automatically the script prints the exact command to run.
+> Set `OILSAND_SKIP_DEPS=1` to skip dependency setup entirely. The core features (gateway,
+> pool, models, chat, load) need none of these — just the static binary. You can still
+> override the interpreter/script path with `OILSAND_PYTHON` and `OILSAND_VM_SCRIPT`.
 
 ## Build from source
 
@@ -49,9 +57,12 @@ irm https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/script
 cd tui
 go build -o oilsand-tui .
 
-# run
-./oilsand-tui --gateway http://10.42.156.22:40114 \
-    --ssh-user rocky --ssh-password 'Nutanix/4u'
+# run (first launch prompts for the gateway + SSH credentials and remembers them)
+./oilsand-tui
+
+# …or pre-seed them via flags / environment variables
+./oilsand-tui --gateway http://gateway-host:40114 \
+    --ssh-user rocky --ssh-password 'your-ssh-password'
 ```
 
 Tagging a release (`git tag v0.1.0 && git push origin v0.1.0`) triggers the GoReleaser
@@ -103,8 +114,15 @@ Sections:
 * **Access** — create/rotate a client API token (`t`/`X`); shows the OpenAI Base URL, token, model
   and a `curl` example.
 
-Gateway URL, SSH user and password can also be supplied via the `OLLA_GATEWAY`,
-`OLLA_SSH_USER` and `OLLA_SSH_PASSWORD` environment variables.
+### First launch
+
+The first time you run the TUI with no saved configuration it opens the **Connect** form
+automatically and asks for your Olla gateway URL and SSH credentials — nothing is hardcoded.
+Those values are saved to `~/.oilsand-ai-gateway/tui.json` (mode `0600`) and reused on later
+runs. Gateway URL, SSH user and password can also be supplied up front via the `OLLA_GATEWAY`,
+`OLLA_SSH_USER` and `OLLA_SSH_PASSWORD` environment variables (flags/env take precedence over the
+saved values). The VM password for Nutanix deploys is entered in the **Nutanix** settings form
+(`e`) — deploys are blocked until it is set.
 
 ## VM (AHV) deployment — Patterns A and B
 
@@ -120,12 +138,15 @@ Install dependencies and set Prism Central credentials:
 
 ```bash
 pip install -r requirements.txt
-export PRISM_CENTRAL_URL="https://10.42.156.7:9440"
+export PRISM_CENTRAL_URL="https://prism-central-host:9440"
 export PRISM_USER="admin"
 export PRISM_PASSWORD="********"
+# guest (cloud-init) password for the new VM — no default is shipped
+export OILSAND_VM_PASSWORD="your-vm-password"
 ```
 
-Pattern A (default: Rocky 9 generic cloud image, 8 vCPU / 12 GiB / 50 GiB, password `Nutanix/4u`):
+Pattern A (default: Rocky 9 generic cloud image, 8 vCPU / 12 GiB / 50 GiB). The guest password
+must be supplied via `OILSAND_VM_PASSWORD` or `--vm-password`:
 
 ```bash
 scripts/nutanix_olla_vm.py pattern-a --vm-name olla-gateway-01
@@ -136,7 +157,7 @@ Pattern B (registers with the Pattern A Olla recorded in `~/.oilsand-ai-gateway/
 ```bash
 scripts/nutanix_olla_vm.py pattern-b --vm-name ollama-worker-01 --model rnj-1
 # or register with a specific Olla instance:
-scripts/nutanix_olla_vm.py pattern-b --model rnj-1 --olla-url http://10.42.156.50:40114
+scripts/nutanix_olla_vm.py pattern-b --model rnj-1 --olla-url http://gateway-host:40114
 ```
 
 Defaults target the discovered environment (`canucks` cluster, `canucks.primary.vlan0`
@@ -152,8 +173,8 @@ existing `ollama-worker-NN` VMs and uses the next index (zero-padded), restartin
 none exist. Gateways follow the same scheme with `olla-gateway-NN`. Query it directly:
 
 ```bash
-scripts/nutanix_olla_vm.py next-name --role worker  --prism-url https://10.42.156.7:9440
-scripts/nutanix_olla_vm.py next-name --role gateway --prism-url https://10.42.156.7:9440
+scripts/nutanix_olla_vm.py next-name --role worker  --prism-url https://prism-central-host:9440
+scripts/nutanix_olla_vm.py next-name --role gateway --prism-url https://prism-central-host:9440
 ```
 
 ### Prism Central helper subcommands
@@ -163,8 +184,8 @@ addition to user/password, plus VM lifecycle helpers used by the TUI:
 
 ```bash
 # Show info for the managed VMs (JSON)
-scripts/nutanix_olla_vm.py show --name-prefix oll --prism-url https://10.42.156.7:9440
+scripts/nutanix_olla_vm.py show --name-prefix oll --prism-url https://prism-central-host:9440
 
 # Delete a VM by name
-scripts/nutanix_olla_vm.py delete --name ollama-worker-02 --prism-url https://10.42.156.7:9440
+scripts/nutanix_olla_vm.py delete --name ollama-worker-02 --prism-url https://prism-central-host:9440
 ```

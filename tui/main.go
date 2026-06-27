@@ -38,8 +38,8 @@ func main() {
 		return
 	}
 
-	gateway := flag.String("gateway", os.Getenv("OLLA_GATEWAY"), "Olla gateway URL, e.g. http://10.42.156.22:40114")
-	sshUser := flag.String("ssh-user", envOr("OLLA_SSH_USER", "rocky"), "SSH user for endpoint add/remove on the gateway VM")
+	gateway := flag.String("gateway", os.Getenv("OLLA_GATEWAY"), "Olla gateway URL, e.g. http://gateway-host:40114")
+	sshUser := flag.String("ssh-user", os.Getenv("OLLA_SSH_USER"), "SSH user for endpoint add/remove on the gateway VM")
 	sshPass := flag.String("ssh-password", os.Getenv("OLLA_SSH_PASSWORD"), "SSH password for the gateway VM")
 	flag.Parse()
 

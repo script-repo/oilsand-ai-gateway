@@ -31,7 +31,7 @@ func (m *model) openConnect() tea.Cmd {
 	m.modal = modalConnect
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Olla gateway URL").
-			Placeholder("http://10.42.156.22:40114").Value(&m.fGateway),
+			Placeholder("http://gateway-host:40114").Value(&m.fGateway),
 		huh.NewInput().Title("SSH user").Description("used to edit endpoints on the gateway VM").
 			Placeholder("rocky").Value(&m.fSSHUser),
 		huh.NewInput().Title("SSH password").Password(true).Value(&m.fSSHPass),
@@ -49,7 +49,7 @@ func (m *model) openEndpoint() tea.Cmd {
 	m.modal = modalEndpoint
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Endpoint name").Placeholder("ollama-worker-03").Value(&m.fEpName),
-		huh.NewInput().Title("Endpoint URL").Placeholder("http://10.42.156.24:11434").Value(&m.fEpURL),
+		huh.NewInput().Title("Endpoint URL").Placeholder("http://worker-host:11434").Value(&m.fEpURL),
 		huh.NewSelect[string]().Title("Type").
 			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
 		huh.NewInput().Title("Priority").Placeholder("100").Value(&m.fEpPrio),
@@ -108,6 +108,10 @@ func (m *model) openDeploy(role string) tea.Cmd {
 		m.notice = "a deploy/delete is already running"
 		return nil
 	}
+	if withDeployDefaults(m.deployCfg).VMPassword == "" {
+		m.notice = "set a VM password in Nutanix settings first"
+		return m.openNutanixCfg()
+	}
 	def := m.effDefaultModel()
 	m.fRole, m.fName, m.fModel = role, "", def
 	m.modal = modalDeploy
@@ -146,7 +150,7 @@ func (m *model) openNutanixCfg() tea.Cmd {
 		huh.NewGroup(
 			huh.NewNote().Title("Prism Central").
 				Description("Leave the API key blank to use a user/password service account instead."),
-			huh.NewInput().Title("PC host / IP").Placeholder("10.42.156.10").Value(&m.fPCHost),
+			huh.NewInput().Title("PC host / IP").Placeholder("prism-central host or IP").Value(&m.fPCHost),
 			huh.NewInput().Title("PC port").Placeholder("9440").Value(&m.fPCPort),
 			huh.NewInput().Title("API key").Password(true).
 				Description("X-Ntnx-Api-Key (preferred)").Value(&m.fPCKey),
@@ -250,6 +254,8 @@ func (m *model) onFormComplete() tea.Cmd {
 		m.sshUser = orDefault(strings.TrimSpace(m.fSSHUser), "rocky")
 		m.sshPass = m.fSSHPass
 		m.connInfo = "connecting…"
+		// Remember the connection so later launches skip first-run setup.
+		_ = saveConnect(m.tokFile, m.gateway, m.sshUser, m.sshPass)
 		return connectCmd(gw)
 
 	case modalEndpoint:

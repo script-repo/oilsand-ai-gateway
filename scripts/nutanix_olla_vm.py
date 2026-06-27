@@ -19,9 +19,14 @@ Two workflows, mirroring the operator patterns:
 The VM lifecycle uses the Prism Central v4 REST API directly so this script is
 usable on its own. Credentials are read from the environment:
 
-  PRISM_CENTRAL_URL   e.g. https://10.42.156.7:9440
+  PRISM_CENTRAL_URL   e.g. https://prism-central-host:9440
   PRISM_USER          Prism Central username
   PRISM_PASSWORD      Prism Central password
+
+The guest password is supplied per run (no default is baked in):
+
+  OILSAND_VM_PASSWORD the cloud-init password for the 'rocky' user, or pass
+                      --vm-password explicitly.
 
 SSH into the guest uses password auth (paramiko) with the cloud-init credentials.
 """
@@ -60,7 +65,9 @@ DEFAULT_MEMORY_GIB = 12
 DEFAULT_DISK_GIB = 50
 
 DEFAULT_VM_USER = "rocky"
-DEFAULT_VM_PASSWORD = "Nutanix/4u"
+# No password is baked in; it must be supplied per run via --vm-password or the
+# OILSAND_VM_PASSWORD environment variable.
+DEFAULT_VM_PASSWORD = os.environ.get("OILSAND_VM_PASSWORD", "")
 DEFAULT_MODEL = "rnj-1"
 OLLA_PORT = 40114
 OLLAMA_PORT = 11434
@@ -809,8 +816,9 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB)
     p.add_argument("--vm-user", default=DEFAULT_VM_USER)
     p.add_argument("--vm-password", default=DEFAULT_VM_PASSWORD)
-    p.add_argument("--ip-prefix", default="10.42.156.",
-                   help="Prefer a learned IP with this prefix (set empty to take the first)")
+    p.add_argument("--ip-prefix", default=os.environ.get("OILSAND_IP_PREFIX", ""),
+                   help="Prefer a learned IP with this subnet prefix (default: take the first learned IP; "
+                        "or set OILSAND_IP_PREFIX)")
     p.add_argument("--dry-run", action="store_true",
                    help="Print the VM create body and cloud-init, then exit")
 
@@ -869,6 +877,12 @@ def main() -> int:
     nn.add_argument("--prefix", default=None, help="Override the name prefix (e.g. ollama-worker-)")
 
     args = parser.parse_args()
+
+    # Commands that SSH into the guest need the cloud-init password. No default
+    # is baked in, so require it explicitly (flag or OILSAND_VM_PASSWORD).
+    if args.command in ("pattern-a", "pattern-b", "install-a", "install-b") and not getattr(args, "vm_password", ""):
+        fatal("VM password required: pass --vm-password or set OILSAND_VM_PASSWORD "
+              "(no default password is shipped)")
 
     if args.command in ("install-a", "install-b"):
         if args.command == "install-a":

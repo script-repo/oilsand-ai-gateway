@@ -23,8 +23,8 @@ var directHTTP = &http.Client{Timeout: 0}
 // workerRef is one Ollama backend addressed directly (not via the gateway).
 type workerRef struct {
 	name string
-	url  string // e.g. http://10.42.156.21:11434
-	host string // e.g. 10.42.156.21
+	url  string // e.g. http://worker-host:11434
+	host string // e.g. worker-host
 }
 
 // workersFromEndpoints keeps only the Ollama-type endpoints and resolves hosts.

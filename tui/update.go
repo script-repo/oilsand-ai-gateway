@@ -60,6 +60,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case firstRunMsg:
+		m.notice = "welcome — enter your Olla gateway URL and SSH credentials to get started"
+		return m, m.openConnect()
+
 	case connectedMsg:
 		if msg.err != nil {
 			m.connected = false

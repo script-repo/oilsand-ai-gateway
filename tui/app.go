@@ -274,6 +274,12 @@ func newModel(gateway, sshUser, sshPass string) model {
 	tokFile := filepath.Join(home, ".oilsand-ai-gateway", "tui.json")
 	st := loadSettings(tokFile)
 
+	// Connection details come from flags/env first, then the values captured on
+	// a previous launch (first-run setup), then the built-in user fallback.
+	gateway = orDefault(gateway, st.Gateway)
+	sshUser = orDefault(sshUser, st.SSHUser)
+	sshPass = orDefault(sshPass, st.SSHPass)
+
 	// Prism Central comes from the persisted override when set, else mcp.json.
 	pcCfg := pcConfigFromOverride(st.PC)
 	if pcCfg == nil {
@@ -335,6 +341,10 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.gateway != "" {
 		cmds = append(cmds, connectCmd(m.gateway))
+	} else {
+		// First launch (or a cleared config): prompt for the gateway + SSH
+		// credentials instead of shipping hardcoded lab values.
+		cmds = append(cmds, func() tea.Msg { return firstRunMsg{} })
 	}
 	return tea.Batch(cmds...)
 }
@@ -342,6 +352,10 @@ func (m model) Init() tea.Cmd {
 // ---- messages --------------------------------------------------------------
 
 type tickMsg time.Time
+
+// firstRunMsg is emitted once at startup when no gateway is configured, so the
+// connection modal opens automatically for the user to enter their details.
+type firstRunMsg struct{}
 type connectedMsg struct {
 	gateway string
 	info    VersionInfo
