@@ -51,9 +51,10 @@ func newHuhKeyMap() *huh.KeyMap {
 // selectOrInput returns a Huh select bound to val when opts is non-empty — so
 // the user picks from the live Prism Central inventory — otherwise a free-text
 // input, so the form still works when PC is unreachable or hasn't been polled.
-func selectOrInput(title, placeholder string, opts []string, val *string) huh.Field {
+// key lets onFormComplete read the chosen value via the form (copy-immune).
+func selectOrInput(key, title, placeholder string, opts []string, val *string) huh.Field {
 	if len(opts) == 0 {
-		return huh.NewInput().Title(title).Placeholder(placeholder).Value(val)
+		return huh.NewInput().Key(key).Title(title).Placeholder(placeholder).Value(val)
 	}
 	options := make([]huh.Option[string], 0, len(opts)+1)
 	switch {
@@ -66,7 +67,7 @@ func selectOrInput(title, placeholder string, opts []string, val *string) huh.Fi
 	for _, o := range opts {
 		options = append(options, huh.NewOption(o, o))
 	}
-	return huh.NewSelect[string]().Title(title).Options(options...).Value(val)
+	return huh.NewSelect[string]().Key(key).Title(title).Options(options...).Value(val)
 }
 
 func containsStr(xs []string, s string) bool {
@@ -89,11 +90,11 @@ func (m *model) openConnect() tea.Cmd {
 	m.fSSHPass = m.sshPass
 	m.modal = modalConnect
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewInput().Title("Olla gateway URL").
+		huh.NewInput().Key("gateway").Title("Olla gateway URL").
 			Placeholder("http://gateway-host:40114").Value(&m.fGateway),
-		huh.NewInput().Title("SSH user").Description("used to edit endpoints on the gateway VM").
+		huh.NewInput().Key("sshuser").Title("SSH user").Description("used to edit endpoints on the gateway VM").
 			Placeholder("rocky").Value(&m.fSSHUser),
-		huh.NewInput().Title("SSH password").Password(true).Value(&m.fSSHPass),
+		huh.NewInput().Key("sshpass").Title("SSH password").Password(true).Value(&m.fSSHPass),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -107,11 +108,11 @@ func (m *model) openEndpoint() tea.Cmd {
 	m.fEpName, m.fEpURL, m.fEpType, m.fEpPrio = "", "", "ollama", "100"
 	m.modal = modalEndpoint
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewInput().Title("Endpoint name").Placeholder("ollama-worker-03").Value(&m.fEpName),
-		huh.NewInput().Title("Endpoint URL").Placeholder("http://worker-host:11434").Value(&m.fEpURL),
-		huh.NewSelect[string]().Title("Type").
+		huh.NewInput().Key("epname").Title("Endpoint name").Placeholder("ollama-worker-03").Value(&m.fEpName),
+		huh.NewInput().Key("epurl").Title("Endpoint URL").Placeholder("http://worker-host:11434").Value(&m.fEpURL),
+		huh.NewSelect[string]().Key("eptype").Title("Type").
 			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
-		huh.NewInput().Title("Priority").Placeholder("100").Value(&m.fEpPrio),
+		huh.NewInput().Key("epprio").Title("Priority").Placeholder("100").Value(&m.fEpPrio),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -125,7 +126,7 @@ func (m *model) openPull() tea.Cmd {
 	m.fModel = ""
 	m.modal = modalPull
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewInput().Title("Model to pull").
+		huh.NewInput().Key("model").Title("Model to pull").
 			Description("downloads through the gateway's Ollama proxy").
 			Placeholder("llama3.2:3b").Value(&m.fModel),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
@@ -189,10 +190,10 @@ func (m *model) openDeploy(role string) tea.Cmd {
 	m.fRole, m.fName, m.fModel = role, "", def
 	m.modal = modalDeploy
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().Title("Role").
+		huh.NewSelect[string]().Key("role").Title("Role").
 			Options(huh.NewOptions("worker", "gateway")...).Value(&m.fRole),
-		huh.NewInput().Title("VM name").Description("blank = auto-increment (ollama-worker-NN)").Value(&m.fName),
-		huh.NewInput().Title("Model").Description("worker only · defaults to the current default model").
+		huh.NewInput().Key("vmname").Title("VM name").Description("blank = auto-increment (ollama-worker-NN)").Value(&m.fName),
+		huh.NewInput().Key("model").Title("Model").Description("worker only · defaults to the current default model").
 			Placeholder(def).Value(&m.fModel),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
@@ -223,30 +224,30 @@ func (m *model) openNutanixCfg() tea.Cmd {
 		huh.NewGroup(
 			huh.NewNote().Title("Prism Central").
 				Description("Leave the API key blank to use a user/password service account instead."),
-			huh.NewInput().Title("PC host / IP").Placeholder("prism-central host or IP").Value(&m.fPCHost),
-			huh.NewInput().Title("PC port").Placeholder("9440").Value(&m.fPCPort),
-			huh.NewInput().Title("API key").Password(true).
+			huh.NewInput().Key("pchost").Title("PC host / IP").Placeholder("prism-central host or IP").Value(&m.fPCHost),
+			huh.NewInput().Key("pcport").Title("PC port").Placeholder("9440").Value(&m.fPCPort),
+			huh.NewInput().Key("pckey").Title("API key").Password(true).
 				Description("X-Ntnx-Api-Key (preferred)").Value(&m.fPCKey),
-			huh.NewInput().Title("Service account user").Placeholder("admin").Value(&m.fPCUser),
-			huh.NewInput().Title("Service account password").Password(true).Value(&m.fPCPass),
+			huh.NewInput().Key("pcuser").Title("Service account user").Placeholder("admin").Value(&m.fPCUser),
+			huh.NewInput().Key("pcpass").Title("Service account password").Password(true).Value(&m.fPCPass),
 		),
 		huh.NewGroup(
 			huh.NewNote().Title("VM template").Description("Resources for newly deployed gateways/workers."),
-			huh.NewInput().Title("Sockets").Placeholder("2").Value(&m.fSockets),
-			huh.NewInput().Title("Cores / socket").Placeholder("4").Value(&m.fCores),
-			huh.NewInput().Title("Memory (GiB)").Placeholder("12").Value(&m.fMem),
-			huh.NewInput().Title("Disk (GiB)").Placeholder("50").Value(&m.fDisk),
-			huh.NewInput().Title("VM user").Placeholder("rocky").Value(&m.fVMUser),
-			huh.NewInput().Title("VM password").Password(true).Value(&m.fVMPass),
+			huh.NewInput().Key("sockets").Title("Sockets").Placeholder("2").Value(&m.fSockets),
+			huh.NewInput().Key("cores").Title("Cores / socket").Placeholder("4").Value(&m.fCores),
+			huh.NewInput().Key("mem").Title("Memory (GiB)").Placeholder("12").Value(&m.fMem),
+			huh.NewInput().Key("disk").Title("Disk (GiB)").Placeholder("50").Value(&m.fDisk),
+			huh.NewInput().Key("vmuser").Title("VM user").Placeholder("rocky").Value(&m.fVMUser),
+			huh.NewInput().Key("vmpass").Title("VM password").Password(true).Value(&m.fVMPass),
 		),
 		huh.NewGroup(
 			huh.NewNote().Title("Image & placement").
 				Description(fmt.Sprintf("Live from Prism Central: %d images, %d clusters, %d subnets. "+
 					"If a count is 0, PC wasn't reachable — set the PC fields above, save, then reopen to get dropdowns.",
 					len(m.images), len(m.clusters), len(m.subnets))),
-			selectOrInput("Image name", "disk image to clone", m.images, &m.fImage),
-			selectOrInput("Cluster", "target cluster", m.clusters, &m.fCluster),
-			selectOrInput("Subnet", "target subnet", m.subnets, &m.fSubnet),
+			selectOrInput("image", "Image name", "disk image to clone", m.images, &m.fImage),
+			selectOrInput("cluster", "Cluster", "target cluster", m.clusters, &m.fCluster),
+			selectOrInput("subnet", "Subnet", "target subnet", m.subnets, &m.fSubnet),
 		),
 	).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	cmd := m.form.Init()
@@ -275,18 +276,18 @@ func (m *model) openHermesCfg() tea.Cmd {
 		huh.NewGroup(
 			huh.NewNote().Title("Hermes Telegram gateway").
 				Description("Create a bot with @BotFather, paste its token here. Saved to tui.json and reused for every Hermes deploy."),
-			huh.NewInput().Title("Bot token").Password(true).
+			huh.NewInput().Key("tgtoken").Title("Bot token").Password(true).
 				Placeholder("123456789:AA...").Value(&m.fTgToken),
-			huh.NewInput().Title("Allowed Telegram user IDs").
+			huh.NewInput().Key("tgallowed").Title("Allowed Telegram user IDs").
 				Description("comma-separated; blank = pair via DM after deploy").Value(&m.fTgAllowed),
-			huh.NewInput().Title("Home channel (optional)").
+			huh.NewInput().Key("tghome").Title("Home channel (optional)").
 				Description("default chat ID for cron/notifications").Value(&m.fTgHome),
-			huh.NewSelect[string]().Title("Gateway service").
+			huh.NewSelect[string]().Key("gwmode").Title("Gateway service").
 				Options(
 					huh.NewOption("user (no sudo, runs at login via linger)", "user"),
 					huh.NewOption("system (root, starts at boot)", "system"),
 				).Value(&m.fGwMode),
-			huh.NewConfirm().Title("Auto-setup gateway on Hermes deploy?").
+			huh.NewConfirm().Key("gwenable").Title("Auto-setup gateway on Hermes deploy?").
 				Affirmative("Yes").Negative("No").Value(&m.fGwEnable),
 		),
 	).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
@@ -316,44 +317,62 @@ func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
 	}
 	m.modal = modalAgentHost
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().
+		huh.NewSelect[string]().Key("agenthost").
 			Title(verb + " " + agentName + " on which worker?").
 			Options(opts...).Value(&m.fAgentHost),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
+// fstr reads a form field's value by key and trims it. Reading via the form
+// (rather than the Value(&…)-bound model field) is immune to Bubble Tea's
+// per-update model copying, which otherwise drops the user's typed edits.
+func (m *model) fstr(key string) string {
+	if m.form == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.form.GetString(key))
+}
+
+// fsecret is like fstr but preserves the value verbatim (no trim) for passwords.
+func (m *model) fsecret(key string) string {
+	if m.form == nil {
+		return ""
+	}
+	return m.form.GetString(key)
+}
+
 // onFormComplete dispatches the action for the just-submitted modal.
 func (m *model) onFormComplete() tea.Cmd {
 	switch m.modal {
 	case modalConnect:
-		gw := normalizeGateway(m.fGateway)
+		gw := normalizeGateway(m.fstr("gateway"))
 		if gw == "" {
 			m.notice = "enter a gateway URL"
 			return nil
 		}
 		m.gateway = gw
-		m.sshUser = orDefault(strings.TrimSpace(m.fSSHUser), "rocky")
-		m.sshPass = m.fSSHPass
+		m.sshUser = orDefault(m.fstr("sshuser"), "rocky")
+		m.sshPass = m.fsecret("sshpass")
 		m.connInfo = "connecting…"
 		// Remember the connection so later launches skip first-run setup.
 		_ = saveConnect(m.tokFile, m.gateway, m.sshUser, m.sshPass)
 		return connectCmd(gw)
 
 	case modalEndpoint:
-		name := strings.TrimSpace(m.fEpName)
-		url := strings.TrimSpace(m.fEpURL)
+		name := m.fstr("epname")
+		url := m.fstr("epurl")
 		if name == "" || url == "" {
 			m.notice = "endpoint name and URL are required"
 			return nil
 		}
-		prio, _ := strconv.Atoi(strings.TrimSpace(m.fEpPrio))
+		prio, _ := strconv.Atoi(m.fstr("epprio"))
 		if prio == 0 {
 			prio = 100
 		}
 		e := endpointEntry{
 			Name: name, URL: url,
-			Type:          orDefault(m.fEpType, "ollama"),
+			Type:          orDefault(m.fstr("eptype"), "ollama"),
 			Priority:      prio,
 			CheckInterval: "10s", CheckTimeout: "3s",
 		}
@@ -362,7 +381,7 @@ func (m *model) onFormComplete() tea.Cmd {
 		return sshAddAndKeyCmd(host, orDefault(m.sshUser, "rocky"), m.sshPass, e)
 
 	case modalPull:
-		name := strings.TrimSpace(m.fModel)
+		name := m.fstr("model")
 		if name == "" {
 			m.notice = "enter a model name to pull"
 			return nil
@@ -389,11 +408,13 @@ func (m *model) onFormComplete() tea.Cmd {
 		return m.startMultiPull(names, workers, true, label)
 
 	case modalDeploy:
-		if m.fRole == "gateway" {
+		role := orDefault(m.fstr("role"), m.fRole)
+		name := m.fstr("vmname")
+		if role == "gateway" {
 			args := []string{"pattern-a"}
 			args = append(args, m.deployFlags()...)
-			if n := strings.TrimSpace(m.fName); n != "" {
-				args = append(args, "--vm-name", n)
+			if name != "" {
+				args = append(args, "--vm-name", name)
 			}
 			return m.startProc(args, "deploy gateway")
 		}
@@ -402,31 +423,31 @@ func (m *model) onFormComplete() tea.Cmd {
 			return nil
 		}
 		args := []string{"pattern-b", "--model",
-			orDefault(strings.TrimSpace(m.fModel), m.effDefaultModel()), "--olla-url", m.gateway}
+			orDefault(m.fstr("model"), m.effDefaultModel()), "--olla-url", m.gateway}
 		args = append(args, m.deployFlags()...)
-		if n := strings.TrimSpace(m.fName); n != "" {
-			args = append(args, "--vm-name", n)
+		if name != "" {
+			args = append(args, "--vm-name", name)
 		}
 		return m.startProc(args, "deploy worker")
 
 	case modalNutanixCfg:
 		d := withDeployDefaults(deploySettings{
-			ImageName:      strings.TrimSpace(m.fImage),
-			ClusterName:    strings.TrimSpace(m.fCluster),
-			SubnetName:     strings.TrimSpace(m.fSubnet),
-			NumSockets:     atoiOr(m.fSockets, 0),
-			CoresPerSocket: atoiOr(m.fCores, 0),
-			MemoryGiB:      atoiOr(m.fMem, 0),
-			DiskGiB:        atoiOr(m.fDisk, 0),
-			VMUser:         strings.TrimSpace(m.fVMUser),
-			VMPassword:     m.fVMPass,
+			ImageName:      m.fstr("image"),
+			ClusterName:    m.fstr("cluster"),
+			SubnetName:     m.fstr("subnet"),
+			NumSockets:     atoiOr(m.fstr("sockets"), 0),
+			CoresPerSocket: atoiOr(m.fstr("cores"), 0),
+			MemoryGiB:      atoiOr(m.fstr("mem"), 0),
+			DiskGiB:        atoiOr(m.fstr("disk"), 0),
+			VMUser:         m.fstr("vmuser"),
+			VMPassword:     m.fsecret("vmpass"),
 		})
 		o := pcOverride{
-			Host:     strings.TrimSpace(m.fPCHost),
-			Port:     strings.TrimSpace(m.fPCPort),
-			APIKey:   strings.TrimSpace(m.fPCKey),
-			User:     strings.TrimSpace(m.fPCUser),
-			Password: m.fPCPass,
+			Host:     m.fstr("pchost"),
+			Port:     m.fstr("pcport"),
+			APIKey:   m.fstr("pckey"),
+			User:     m.fstr("pcuser"),
+			Password: m.fsecret("pcpass"),
 		}
 		m.deployCfg = d
 		m.pcOver = o
@@ -447,15 +468,19 @@ func (m *model) onFormComplete() tea.Cmd {
 		if !ok {
 			return nil
 		}
-		return m.startAgent(a, m.pendingAct, strings.TrimSpace(m.fAgentHost))
+		return m.startAgent(a, m.pendingAct, orDefault(m.fstr("agenthost"), m.fAgentHost))
 
 	case modalHermesCfg:
+		enable := m.fGwEnable
+		if m.form != nil {
+			enable = m.form.GetBool("gwenable")
+		}
 		h := hermesSettings{
-			TelegramBotToken:     strings.TrimSpace(m.fTgToken),
-			TelegramAllowedUsers: strings.TrimSpace(m.fTgAllowed),
-			TelegramHomeChannel:  strings.TrimSpace(m.fTgHome),
-			GatewayEnabled:       m.fGwEnable,
-			GatewayMode:          orDefault(m.fGwMode, "user"),
+			TelegramBotToken:     m.fstr("tgtoken"),
+			TelegramAllowedUsers: m.fstr("tgallowed"),
+			TelegramHomeChannel:  m.fstr("tghome"),
+			GatewayEnabled:       enable,
+			GatewayMode:          orDefault(m.fstr("gwmode"), "user"),
 		}
 		m.hermesCfg = h
 		_ = saveHermesCfg(m.tokFile, h)
