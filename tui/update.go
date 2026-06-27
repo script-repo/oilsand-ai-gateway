@@ -101,12 +101,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case vmsMsg:
+		// Placement lists are fetched independently of the VM list, so keep
+		// them even if the VM query itself failed (the deploy form needs them).
+		if len(msg.clusters) > 0 {
+			m.clusters = msg.clusters
+		}
+		if len(msg.images) > 0 {
+			m.images = msg.images
+		}
+		if len(msg.subnets) > 0 {
+			m.subnets = msg.subnets
+		}
 		if msg.err != nil {
 			m.notice = "Prism Central query failed: " + msg.err.Error()
 			return m, nil
 		}
 		m.vms = msg.vms
-		m.clusters = msg.clusters
 		m.refreshVMs()
 		return m, nil
 

@@ -54,10 +54,12 @@ try:
 except ImportError:  # pragma: no cover
     sys.exit("Missing dependency 'paramiko'. Install with: pip install -r requirements.txt")
 
-# --- Defaults discovered from the target environment ------------------------
-DEFAULT_IMAGE_NAME = "Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
-DEFAULT_CLUSTER_NAME = "canucks"
-DEFAULT_SUBNET_NAME = "canucks.primary.vlan0"
+# --- Placement (no defaults: chosen from the live Prism Central inventory) ---
+# The TUI populates these from PC; CLI callers must pass --image-name,
+# --cluster-name and --subnet-name (or the env vars below) per run.
+DEFAULT_IMAGE_NAME = os.environ.get("OILSAND_IMAGE_NAME", "")
+DEFAULT_CLUSTER_NAME = os.environ.get("OILSAND_CLUSTER_NAME", "")
+DEFAULT_SUBNET_NAME = os.environ.get("OILSAND_SUBNET_NAME", "")
 
 DEFAULT_NUM_SOCKETS = 2
 DEFAULT_CORES_PER_SOCKET = 4  # 2 x 4 = 8 vCPU
@@ -883,6 +885,18 @@ def main() -> int:
     if args.command in ("pattern-a", "pattern-b", "install-a", "install-b") and not getattr(args, "vm_password", ""):
         fatal("VM password required: pass --vm-password or set OILSAND_VM_PASSWORD "
               "(no default password is shipped)")
+
+    # Provisioning needs explicit placement; no lab defaults are baked in.
+    if args.command in ("pattern-a", "pattern-b"):
+        prov_missing = [name for name, val in (
+            ("--image-name", getattr(args, "image_name", "")),
+            ("--cluster-name", getattr(args, "cluster_name", "")),
+            ("--subnet-name", getattr(args, "subnet_name", "")),
+        ) if not val]
+        if prov_missing:
+            fatal("missing required placement option(s): " + ", ".join(prov_missing) +
+                  " — pick them in the TUI, or pass them explicitly (also settable via "
+                  "OILSAND_IMAGE_NAME / OILSAND_CLUSTER_NAME / OILSAND_SUBNET_NAME)")
 
     if args.command in ("install-a", "install-b"):
         if args.command == "install-a":

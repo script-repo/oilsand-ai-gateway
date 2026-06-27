@@ -80,7 +80,9 @@ func vmsCmd(cfg *PCConfig) tea.Cmd {
 		pc := NewPCClient(cfg)
 		vms, err := pc.ListVMs()
 		clusters := pc.ClusterNames()
-		return vmsMsg{vms: vms, clusters: clusters, err: err}
+		images := pc.ImageNames()
+		subnets := pc.SubnetNames()
+		return vmsMsg{vms: vms, clusters: clusters, images: images, subnets: subnets, err: err}
 	}
 }
 
@@ -402,9 +404,11 @@ type pcOverride struct {
 // form can pre-fill sensible values.
 func deployDefaults() deploySettings {
 	return deploySettings{
-		ImageName:      "Rocky-9-GenericCloud-Base.latest.x86_64.qcow2",
-		ClusterName:    "canucks",
-		SubnetName:     "canucks.primary.vlan0",
+		// Image / cluster / subnet have no baked-in defaults: they are chosen
+		// from the live Prism Central inventory in the Nutanix settings form.
+		ImageName:      "",
+		ClusterName:    "",
+		SubnetName:     "",
 		NumSockets:     2,
 		CoresPerSocket: 4,
 		MemoryGiB:      12,

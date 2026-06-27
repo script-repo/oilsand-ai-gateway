@@ -143,13 +143,20 @@ export PRISM_USER="admin"
 export PRISM_PASSWORD="********"
 # guest (cloud-init) password for the new VM — no default is shipped
 export OILSAND_VM_PASSWORD="your-vm-password"
+# placement — no lab defaults are baked in (the TUI offers these as live
+# dropdowns from Prism Central; the CLI needs them passed or set as env vars)
+export OILSAND_IMAGE_NAME="Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
+export OILSAND_CLUSTER_NAME="your-cluster"
+export OILSAND_SUBNET_NAME="your-subnet"
 ```
 
-Pattern A (default: Rocky 9 generic cloud image, 8 vCPU / 12 GiB / 50 GiB). The guest password
-must be supplied via `OILSAND_VM_PASSWORD` or `--vm-password`:
+Pattern A (8 vCPU / 12 GiB / 50 GiB). The guest password and placement (image / cluster /
+subnet) must be supplied — via the env vars above, or explicit flags:
 
 ```bash
-scripts/nutanix_olla_vm.py pattern-a --vm-name olla-gateway-01
+scripts/nutanix_olla_vm.py pattern-a --vm-name olla-gateway-01 \
+    --image-name "$OILSAND_IMAGE_NAME" --cluster-name "$OILSAND_CLUSTER_NAME" \
+    --subnet-name "$OILSAND_SUBNET_NAME"
 ```
 
 Pattern B (registers with the Pattern A Olla recorded in `~/.oilsand-ai-gateway/state.json`):
@@ -160,11 +167,12 @@ scripts/nutanix_olla_vm.py pattern-b --vm-name ollama-worker-01 --model rnj-1
 scripts/nutanix_olla_vm.py pattern-b --model rnj-1 --olla-url http://gateway-host:40114
 ```
 
-Defaults target the discovered environment (`canucks` cluster, `canucks.primary.vlan0`
-subnet, `Rocky-9-GenericCloud-Base.latest.x86_64.qcow2` image) and can be overridden with
-`--cluster-name`, `--subnet-name`, `--image-name`, `--num-sockets`, `--cores-per-socket`,
-`--memory-gib`, and `--disk-gib`. Use `--dry-run` to print the VM create body and cloud-init
-without creating anything. The remote installers live in `scripts/remote/`.
+There are **no baked-in placement defaults**. In the TUI, the Nutanix settings form populates
+**Image**, **Cluster** and **Subnet** as dropdowns polled live from Prism Central (it falls back
+to free-text if PC isn't reachable yet). On the CLI, pass `--image-name`, `--cluster-name` and
+`--subnet-name` (or the `OILSAND_*` env vars). VM sizing can still be tuned with `--num-sockets`,
+`--cores-per-socket`, `--memory-gib`, and `--disk-gib`. Use `--dry-run` to print the VM create
+body and cloud-init without creating anything. The remote installers live in `scripts/remote/`.
 
 ### Worker auto-increment naming
 

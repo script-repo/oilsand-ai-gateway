@@ -19,6 +19,36 @@ func formWidth(m *model) int {
 
 func huhTheme() *huh.Theme { return huh.ThemeCharm() }
 
+// selectOrInput returns a Huh select bound to val when opts is non-empty — so
+// the user picks from the live Prism Central inventory — otherwise a free-text
+// input, so the form still works when PC is unreachable or hasn't been polled.
+func selectOrInput(title, placeholder string, opts []string, val *string) huh.Field {
+	if len(opts) == 0 {
+		return huh.NewInput().Title(title).Placeholder(placeholder).Value(val)
+	}
+	options := make([]huh.Option[string], 0, len(opts)+1)
+	switch {
+	case *val == "":
+		*val = opts[0] // default to the first available rather than a baked-in name
+	case !containsStr(opts, *val):
+		// Keep a previously-saved value selectable even if PC no longer lists it.
+		options = append(options, huh.NewOption(*val+" (saved)", *val))
+	}
+	for _, o := range opts {
+		options = append(options, huh.NewOption(o, o))
+	}
+	return huh.NewSelect[string]().Title(title).Options(options...).Value(val)
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // effDefaultModel is the model new workers/chat should use: the persisted
 // pool-wide default if set, otherwise the built-in default.
 func (m *model) effDefaultModel() string { return orDefault(m.defModel, DefaultModel) }
@@ -108,8 +138,22 @@ func (m *model) openDeploy(role string) tea.Cmd {
 		m.notice = "a deploy/delete is already running"
 		return nil
 	}
-	if withDeployDefaults(m.deployCfg).VMPassword == "" {
-		m.notice = "set a VM password in Nutanix settings first"
+	dcfg := withDeployDefaults(m.deployCfg)
+	var missing []string
+	if dcfg.ImageName == "" {
+		missing = append(missing, "image")
+	}
+	if dcfg.ClusterName == "" {
+		missing = append(missing, "cluster")
+	}
+	if dcfg.SubnetName == "" {
+		missing = append(missing, "subnet")
+	}
+	if dcfg.VMPassword == "" {
+		missing = append(missing, "VM password")
+	}
+	if len(missing) > 0 {
+		m.notice = "set " + strings.Join(missing, ", ") + " in Nutanix settings first"
 		return m.openNutanixCfg()
 	}
 	def := m.effDefaultModel()
@@ -167,10 +211,11 @@ func (m *model) openNutanixCfg() tea.Cmd {
 			huh.NewInput().Title("VM password").Password(true).Value(&m.fVMPass),
 		),
 		huh.NewGroup(
-			huh.NewNote().Title("Image & placement").Description("Source image to clone and where to place the VM."),
-			huh.NewInput().Title("Image name").Value(&m.fImage),
-			huh.NewInput().Title("Cluster").Placeholder("canucks").Value(&m.fCluster),
-			huh.NewInput().Title("Subnet").Placeholder("canucks.primary.vlan0").Value(&m.fSubnet),
+			huh.NewNote().Title("Image & placement").
+				Description("Picked from the live Prism Central inventory (type to filter; falls back to free text if PC isn't reachable yet)."),
+			selectOrInput("Image name", "disk image to clone", m.images, &m.fImage),
+			selectOrInput("Cluster", "target cluster", m.clusters, &m.fCluster),
+			selectOrInput("Subnet", "target subnet", m.subnets, &m.fSubnet),
 		),
 	).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme())
 	return m.form.Init()

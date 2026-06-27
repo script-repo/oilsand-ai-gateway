@@ -112,7 +112,9 @@ type model struct {
 	status    Status
 	models    []Model
 	vms       []VM
-	clusters  []string
+	clusters  []string // PC clusters available for placement
+	images    []string // PC disk images available to clone
+	subnets   []string // PC subnets available for placement
 	endpoints []endpointEntry // cached gateway endpoints (for direct worker ops/console)
 
 	// derived metrics
@@ -372,6 +374,8 @@ type modelsMsg struct {
 type vmsMsg struct {
 	vms      []VM
 	clusters []string
+	images   []string
+	subnets  []string
 	err      error
 }
 type chatEvMsg ChatEvent

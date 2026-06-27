@@ -203,6 +203,71 @@ func (c *PCClient) ClusterNames() []string {
 	return names
 }
 
+// ImageNames lists the names of DISK images on Prism Central (ISO images are
+// skipped since deploys clone a disk image). Returns nil on any error so the
+// settings form falls back to free-text entry.
+func (c *PCClient) ImageNames() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/api/vmm/v4.2/content/images?$limit=100", nil)
+	c.cfg.authHeader(req)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Data []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return nil
+	}
+	var names []string
+	for _, img := range out.Data {
+		if img.Name == "" || strings.EqualFold(img.Type, "ISO_IMAGE") {
+			continue
+		}
+		names = append(names, img.Name)
+	}
+	return names
+}
+
+// SubnetNames lists the names of subnets on Prism Central. Returns nil on any
+// error so the settings form falls back to free-text entry.
+func (c *PCClient) SubnetNames() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/api/networking/v4.2/config/subnets?$limit=100", nil)
+	c.cfg.authHeader(req)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Data []struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return nil
+	}
+	var names []string
+	for _, s := range out.Data {
+		if s.Name != "" {
+			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
 func summarizeVM(r rawVM) VM {
 	ip := "-"
 	for _, n := range r.Nics {
