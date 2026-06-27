@@ -433,6 +433,31 @@ func deployDefaults() deploySettings {
 	}
 }
 
+// legacyPlacement holds the lab-specific placement names that used to be baked
+// into the code/state. They are cleared from saved settings so they never
+// reappear as phantom selections in a different Prism Central environment.
+var legacyPlacement = map[string]bool{
+	"canucks":               true,
+	"canucks.primary.vlan0": true,
+	"Rocky-9-GenericCloud-Base.latest.x86_64.qcow2": true,
+}
+
+// dropLegacyPlacement clears any placement value that matches an old hardcoded
+// lab default, so deploy forms don't pre-seed a cluster/subnet/image that
+// doesn't exist on the user's PC.
+func dropLegacyPlacement(d deploySettings) deploySettings {
+	if legacyPlacement[d.ClusterName] {
+		d.ClusterName = ""
+	}
+	if legacyPlacement[d.SubnetName] {
+		d.SubnetName = ""
+	}
+	if legacyPlacement[d.ImageName] {
+		d.ImageName = ""
+	}
+	return d
+}
+
 // withDeployDefaults fills any zero fields of d from the helper defaults.
 func withDeployDefaults(d deploySettings) deploySettings {
 	def := deployDefaults()

@@ -289,12 +289,19 @@ func newModel(gateway, sshUser, sshPass string) model {
 		pcCfg = LoadPCConfig()
 	}
 
+	// Strip any old hardcoded lab placement (e.g. "canucks") carried over in
+	// tui.json so it never shows as a default in a different environment.
+	cleanedDeploy := dropLegacyPlacement(st.Deploy)
+	if cleanedDeploy != st.Deploy {
+		_ = saveDeployPC(tokFile, withDeployDefaults(cleanedDeploy), st.PC)
+	}
+
 	m := model{
 		gateway:    normalizeGateway(gateway),
 		sshUser:    orDefault(sshUser, "rocky"),
 		sshPass:    sshPass,
 		pcCfg:      pcCfg,
-		deployCfg:  withDeployDefaults(st.Deploy),
+		deployCfg:  withDeployDefaults(cleanedDeploy),
 		pcOver:     st.PC,
 		km:         newKeyMap(),
 		help:       hp,

@@ -88,7 +88,8 @@ Navigation:
 
 A live, context-aware **help bar** (`bubbles/help`) renders the relevant keys for wherever you
 are, and forms (connect / add endpoint / pull / deploy) appear as centered **Huh** modals with
-validation and `Esc`-to-cancel.
+validation and `Esc`-to-cancel. Inside a form, `Tab`/`Enter` move to the next field and
+`Shift+Tab` (or `Ctrl+P`, for terminals/consoles that don't send Shift+Tab) move back.
 
 Sections:
 

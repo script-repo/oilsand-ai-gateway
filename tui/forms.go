@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 )
@@ -18,6 +19,34 @@ func formWidth(m *model) int {
 }
 
 func huhTheme() *huh.Theme { return huh.ThemeCharm() }
+
+// huhKM is the form keymap with a reliable alternate for "previous field". Huh
+// binds Prev to shift+tab only, but some terminals / VM & serial consoles never
+// emit shift+tab, leaving the user unable to go back a field. ctrl+p is added as
+// an alternate on every field type (and removed from Select/MultiSelect "up" so
+// it means the same thing everywhere). Built once and shared by all forms.
+var huhKM = newHuhKeyMap()
+
+func newHuhKeyMap() *huh.KeyMap {
+	k := huh.NewDefaultKeyMap()
+	withPrev := func(b key.Binding) key.Binding {
+		return key.NewBinding(
+			key.WithKeys(append(b.Keys(), "ctrl+p")...),
+			key.WithHelp("shift+tab/^p", "back"),
+		)
+	}
+	k.Input.Prev = withPrev(k.Input.Prev)
+	k.Text.Prev = withPrev(k.Text.Prev)
+	k.Note.Prev = withPrev(k.Note.Prev)
+	k.Confirm.Prev = withPrev(k.Confirm.Prev)
+	k.Select.Prev = withPrev(k.Select.Prev)
+	k.MultiSelect.Prev = withPrev(k.MultiSelect.Prev)
+	// ctrl+p now means "previous field"; keep ↑/k (and ctrl+k) for moving within
+	// a list so the two don't collide.
+	k.Select.Up = key.NewBinding(key.WithKeys("up", "k", "ctrl+k"), key.WithHelp("↑", "up"))
+	k.MultiSelect.Up = key.NewBinding(key.WithKeys("up", "k", "ctrl+k"), key.WithHelp("↑", "up"))
+	return k
+}
 
 // selectOrInput returns a Huh select bound to val when opts is non-empty — so
 // the user picks from the live Prism Central inventory — otherwise a free-text
@@ -65,7 +94,7 @@ func (m *model) openConnect() tea.Cmd {
 		huh.NewInput().Title("SSH user").Description("used to edit endpoints on the gateway VM").
 			Placeholder("rocky").Value(&m.fSSHUser),
 		huh.NewInput().Title("SSH password").Password(true).Value(&m.fSSHPass),
-	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme())
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -83,7 +112,7 @@ func (m *model) openEndpoint() tea.Cmd {
 		huh.NewSelect[string]().Title("Type").
 			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
 		huh.NewInput().Title("Priority").Placeholder("100").Value(&m.fEpPrio),
-	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme())
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -99,7 +128,7 @@ func (m *model) openPull() tea.Cmd {
 		huh.NewInput().Title("Model to pull").
 			Description("downloads through the gateway's Ollama proxy").
 			Placeholder("llama3.2:3b").Value(&m.fModel),
-	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme())
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -124,7 +153,7 @@ func (m *model) openCatalog() tea.Cmd {
 			Title("Download models to all workers").
 			Description("space toggles · enter confirms · ☁ = Ollama Cloud (needs `ollama signin`)").
 			Options(opts...),
-	)).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme())
+	)).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -165,7 +194,7 @@ func (m *model) openDeploy(role string) tea.Cmd {
 		huh.NewInput().Title("VM name").Description("blank = auto-increment (ollama-worker-NN)").Value(&m.fName),
 		huh.NewInput().Title("Model").Description("worker only · defaults to the current default model").
 			Placeholder(def).Value(&m.fModel),
-	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme())
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -219,7 +248,7 @@ func (m *model) openNutanixCfg() tea.Cmd {
 			selectOrInput("Cluster", "target cluster", m.clusters, &m.fCluster),
 			selectOrInput("Subnet", "target subnet", m.subnets, &m.fSubnet),
 		),
-	).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme())
+	).WithWidth(formWidth(m)).WithHeight(18).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	cmd := m.form.Init()
 	// Refresh PC inventory in the background when something's missing so the
 	// counts/notice update and the next open offers dropdowns.
@@ -260,7 +289,7 @@ func (m *model) openHermesCfg() tea.Cmd {
 			huh.NewConfirm().Title("Auto-setup gateway on Hermes deploy?").
 				Affirmative("Yes").Negative("No").Value(&m.fGwEnable),
 		),
-	).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme())
+	).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -290,7 +319,7 @@ func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
 		huh.NewSelect[string]().
 			Title(verb + " " + agentName + " on which worker?").
 			Options(opts...).Value(&m.fAgentHost),
-	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme())
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 

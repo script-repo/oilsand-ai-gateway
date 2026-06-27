@@ -112,6 +112,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.subnets) > 0 {
 			m.subnets = msg.subnets
 		}
+		// Drop saved placement the live PC doesn't list (e.g. a stale "canucks"
+		// cluster from another environment) so deploy forms never offer it.
+		if m.prunePlacement() {
+			_ = saveDeployPC(m.tokFile, m.deployCfg, m.pcOver)
+		}
 		if msg.err != nil {
 			m.notice = "Prism Central query failed: " + msg.err.Error()
 			return m, nil
@@ -349,6 +354,26 @@ func (m *model) disconnect() {
 	m.client = nil
 	m.connInfo = "disconnected"
 	m.notice = "disconnected"
+}
+
+// prunePlacement clears any saved cluster/subnet/image that the live Prism
+// Central inventory doesn't contain, so the deploy/settings forms only ever
+// offer values that actually exist here. Returns true if anything changed.
+func (m *model) prunePlacement() bool {
+	changed := false
+	if len(m.clusters) > 0 && m.deployCfg.ClusterName != "" && !containsStr(m.clusters, m.deployCfg.ClusterName) {
+		m.deployCfg.ClusterName = ""
+		changed = true
+	}
+	if len(m.subnets) > 0 && m.deployCfg.SubnetName != "" && !containsStr(m.subnets, m.deployCfg.SubnetName) {
+		m.deployCfg.SubnetName = ""
+		changed = true
+	}
+	if len(m.images) > 0 && m.deployCfg.ImageName != "" && !containsStr(m.images, m.deployCfg.ImageName) {
+		m.deployCfg.ImageName = ""
+		changed = true
+	}
+	return changed
 }
 
 // modelsRefresh refreshes the model inventory from the workers directly when
