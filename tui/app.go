@@ -347,6 +347,19 @@ func newModel(gateway, sshUser, sshPass string) model {
 	if m.defModel != "" {
 		m.chatModel = m.defModel
 	}
+
+	// The Update list is a dense menu (7 fixed actions), so give it a compact
+	// single-line delegate — the default 3-line delegate would paginate after
+	// ~3 rows in the available height.
+	compact := list.NewDefaultDelegate()
+	compact.ShowDescription = false
+	compact.SetSpacing(0)
+	compact.SetHeight(1)
+	compact.Styles.SelectedTitle = compact.Styles.SelectedTitle.
+		Foreground(colAccent).BorderForeground(colAccent)
+	compact.Styles.NormalTitle = compact.Styles.NormalTitle.Foreground(colText)
+	m.updateList.SetDelegate(compact)
+
 	m.refreshAgents()
 	m.refreshUpdateList()
 	return m
