@@ -100,6 +100,7 @@ type model struct {
 	connected bool
 	client    *OllaClient
 	connInfo  string
+	connVer   string // last known "Name Version Edition" banner, for reconnects
 	sshUser   string
 	sshPass   string
 

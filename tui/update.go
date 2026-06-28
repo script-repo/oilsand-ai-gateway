@@ -55,7 +55,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		cmds := []tea.Cmd{tickCmd()}
-		if m.connected && m.client != nil {
+		// Keep polling whenever we have a client, even while marked
+		// disconnected, so a transient outage (e.g. Olla restarting to
+		// re-discover models after a pull) auto-recovers instead of leaving
+		// the TUI stuck OFFLINE until the user reconnects by hand.
+		if m.client != nil {
 			cmds = append(cmds, statusCmd(m.client))
 		}
 		return m, tea.Batch(cmds...)
@@ -74,7 +78,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connected = true
 		m.gateway = msg.gateway
 		m.client = NewOllaClient(msg.gateway)
-		m.connInfo = strings.TrimSpace(fmt.Sprintf("%s %s %s", msg.info.Name, msg.info.Version, msg.info.Edition))
+		m.connVer = strings.TrimSpace(fmt.Sprintf("%s %s %s", msg.info.Name, msg.info.Version, msg.info.Edition))
+		m.connInfo = m.connVer
 		m.prevTime = time.Time{}
 		m.notice = "connected to " + msg.gateway
 		cmds := []tea.Cmd{statusCmd(m.client), modelsCmd(m.client)}
@@ -90,7 +95,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connInfo = "lost connection: " + msg.err.Error()
 			return m, nil
 		}
+		wasDown := !m.connected
+		m.connected = true
 		m.applyStatus(msg.st)
+		if wasDown {
+			// A poll succeeded after an outage (e.g. Olla finished restarting):
+			// restore the banner and refresh models/endpoints we may have missed.
+			m.connInfo = orDefault(m.connVer, "connected to "+m.gateway)
+			cmds := []tea.Cmd{modelsCmd(m.client)}
+			if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
+				cmds = append(cmds, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
+			}
+			return m, tea.Batch(cmds...)
+		}
 		return m, nil
 
 	case modelsMsg:
