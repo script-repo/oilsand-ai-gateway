@@ -378,9 +378,9 @@ func (m *model) openCustomDeploy() tea.Cmd {
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("custname").Title("Deployment name").
 			Placeholder("e.g. postgres-node").Value(&m.fCustName),
-		huh.NewInput().Key("custurl").Title("Setup script URL").
-			Description("run on the new VM after boot: curl -fsSL <url> | sudo bash").
-			Placeholder("https://example.com/setup.sh").Value(&m.fCustURL),
+		huh.NewInput().Key("custurl").Title("Setup script").
+			Description("a URL (downloaded + sudo bash'd) OR a full shell command run on the VM").
+			Placeholder("https://example.com/setup.sh  or  curl -fsSL <url> | sudo bash").Value(&m.fCustURL),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -647,7 +647,7 @@ func (m *model) onFormComplete() tea.Cmd {
 		name := m.fstr("custname")
 		url := m.fstr("custurl")
 		if name == "" || url == "" {
-			m.notice = "deployment name and script URL are required"
+			m.notice = "deployment name and setup script (URL or command) are required"
 			return nil
 		}
 		m.customDeploys = append(m.customDeploys, customDeploy{Name: name, ScriptURL: url})

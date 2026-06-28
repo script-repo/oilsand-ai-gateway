@@ -740,6 +740,12 @@ def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
 
 
 # --- custom deployment ------------------------------------------------------
+def _looks_like_url(s: str) -> bool:
+    """True for a bare URL (a single token with a scheme); False for a shell
+    command like 'curl -fsSL https://… | sudo bash'."""
+    return bool(re.match(r"^[a-z][a-z0-9+.\-]*://\S+$", s, re.IGNORECASE)) and not any(c.isspace() for c in s)
+
+
 def pattern_custom(pc: PrismClient, args: argparse.Namespace) -> None:
     """Provision a VM from the configured image, then run a user-supplied setup
     script (downloaded from a URL) on the guest. No Olla/Ollama assumptions."""
@@ -752,24 +758,29 @@ def pattern_custom(pc: PrismClient, args: argparse.Namespace) -> None:
 
 def finish_pattern_custom(ip: str, args: argparse.Namespace, vm_name: str,
                           vm_ext_id: str | None = None) -> None:
-    url = args.script_url
+    spec = (args.script_url or "").strip()
     ssh = Ssh(ip, args.vm_user, args.vm_password)
     ssh.connect()
     ssh.wait_cloud_init()
-    log(f"downloading setup script from {url}")
-    remote = "/tmp/custom-setup.sh"
-    qurl = shlex.quote(url)
-    # Download and run as separate steps so a fetch failure is distinguishable
-    # from a script failure; pipefail isn't enough when piping straight to bash.
-    dl_rc, _o, _e = ssh.run(
-        f"curl -fsSL {qurl} -o {remote} || wget -qO {remote} {qurl}"
-    )
-    if dl_rc != 0:
-        ssh.close()
-        fatal(f"failed to download setup script from {url} (exit {dl_rc}); "
-              f"ensure the URL is reachable from the VM and curl/wget is installed")
-    log("running setup script on the guest")
-    rc, _out, _err = ssh.run(f"chmod +x {remote} && sudo bash {remote}")
+
+    if _looks_like_url(spec):
+        # Bare URL: download to a temp file, then run it with sudo. Split into two
+        # steps so a fetch failure is distinguishable from a script failure.
+        remote = "/tmp/custom-setup.sh"
+        qurl = shlex.quote(spec)
+        log(f"downloading setup script from {spec}")
+        dl_rc, _o, _e = ssh.run(f"curl -fsSL {qurl} -o {remote} || wget -qO {remote} {qurl}")
+        if dl_rc != 0:
+            ssh.close()
+            fatal(f"failed to download setup script from {spec} (exit {dl_rc}); "
+                  f"ensure the URL is reachable from the VM and curl/wget is installed")
+        log("running setup script on the guest")
+        rc, _out, _err = ssh.run(f"chmod +x {remote} && sudo bash {remote}")
+    else:
+        # Anything else is treated as a full shell command to run on the guest
+        # (e.g. 'curl -fsSL https://… | sudo bash'). Run it verbatim under bash.
+        log("running setup command on the guest")
+        rc, _out, _err = ssh.run(f"bash -lc {shlex.quote(spec)}")
     ssh.close()
 
     report = {
@@ -777,7 +788,7 @@ def finish_pattern_custom(ip: str, args: argparse.Namespace, vm_name: str,
         "vm_name": vm_name,
         "vm_ext_id": vm_ext_id,
         "ip": ip,
-        "script_url": url,
+        "script": spec,
         "script_exit": rc,
     }
     print("\n=== Custom deployment report ===")

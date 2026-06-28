@@ -162,17 +162,19 @@ installed and launched directly — no SSH password is required for them.
 Beyond the built-in gateway/worker patterns, you can define your own deployment types. Press
 `c` in the **Nutanix** section to open the custom-deployments submenu:
 
-* The first row, **+ add deployment**, opens a form asking for a **name** and a **setup script
-  URL**. Saved configs are listed below it and persist in `~/.oilsand-ai-gateway/tui.json`.
+* The first row, **+ add deployment**, opens a form asking for a **name** and a **setup
+  script**. The setup script can be either a bare **URL** (downloaded to the VM and run with
+  `sudo bash`) or a full **shell command** (e.g. `curl -fsSL <url> | sudo bash`) run verbatim on
+  the guest. Saved configs persist in `~/.oilsand-ai-gateway/tui.json`.
 * Highlight a saved config and press **enter** to deploy: the TUI provisions a VM from the
-  Nutanix settings image/cluster/subnet, waits for cloud-init, then runs your script on the
-  guest as `curl -fsSL <url> | sudo bash`. VM names auto-increment from the deployment name
-  (e.g. `postgres-node-01`, `postgres-node-02`).
+  Nutanix settings image/cluster/subnet, waits for cloud-init, then runs your setup script/command.
+  VM names auto-increment from the deployment name (e.g. `postgres-node-01`, `postgres-node-02`).
 * Press **x** on a saved config to delete it. **esc** returns to the VM list.
 
 This maps to the helper's `pattern-custom` subcommand:
 
 ```bash
+# --script-url accepts a bare URL (downloaded + sudo bash'd) or a full command
 scripts/nutanix_olla_vm.py pattern-custom \
   --script-url https://example.com/setup.sh \
   --name-prefix postgres-node- \
