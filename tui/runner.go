@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // pythonExe picks an interpreter, in order of preference:
@@ -215,10 +217,9 @@ func RunLocalOllaInstall(ch chan<- ProcEvent) {
 	streamProc(cmd, ch)
 }
 
-// RunVMScript runs the python helper with the PC credentials injected via env and
-// streams stdout/stderr lines to ch. A final Done event carries the exit code.
-func RunVMScript(cfg *PCConfig, args []string, ch chan<- ProcEvent) {
-	defer close(ch)
+// buildVMCmd constructs the python helper command for args with the PC
+// credentials injected via env. Shared by the single and parallel runners.
+func buildVMCmd(cfg *PCConfig, args []string) *exec.Cmd {
 	script := vmScriptPath()
 	full := append([]string{script}, args...)
 	if cfg != nil {
@@ -234,7 +235,109 @@ func RunVMScript(cfg *PCConfig, args []string, ch chan<- ProcEvent) {
 			cmd.Env = append(cmd.Env, "PRISM_USER="+cfg.User, "PRISM_PASSWORD="+cfg.Password)
 		}
 	}
-	streamProc(cmd, ch)
+	return cmd
+}
+
+// RunVMScript runs the python helper with the PC credentials injected via env and
+// streams stdout/stderr lines to ch. A final Done event carries the exit code.
+func RunVMScript(cfg *PCConfig, args []string, ch chan<- ProcEvent) {
+	defer close(ch)
+	streamProc(buildVMCmd(cfg, args), ch)
+}
+
+// vmJob is a single python helper invocation for the parallel runner.
+type vmJob struct {
+	tag  string
+	args []string
+}
+
+// tagLine prefixes a log line with "[tag] " so interleaved parallel output stays
+// attributable to a specific worker.
+func tagLine(tag, line string) string {
+	if tag == "" {
+		return line
+	}
+	return "[" + tag + "] " + line
+}
+
+// streamProcLines streams cmd output to ch (each line prefixed with tag) and
+// returns the exit code. Unlike streamProc it does NOT emit a Done event, so the
+// caller can aggregate multiple concurrent jobs into one Done.
+func streamProcLines(cmd *exec.Cmd, tag string, ch chan<- ProcEvent) int {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		ch <- ProcEvent{Line: tagLine(tag, "failed to pipe stdout: "+err.Error())}
+		return 1
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		ch <- ProcEvent{Line: tagLine(tag, "failed to start: "+err.Error())}
+		return 1
+	}
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		ch <- ProcEvent{Line: tagLine(tag, strings.TrimRight(sc.Text(), "\r\n"))}
+	}
+	code := 0
+	if err := cmd.Wait(); err != nil {
+		code = 1
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+	}
+	return code
+}
+
+// RunVMScripts runs several python helper invocations concurrently, tagging each
+// output line with its job tag, and emits a single aggregate Done after all jobs
+// finish. The Done code is non-zero if any job failed. ch is closed on return.
+func RunVMScripts(cfg *PCConfig, jobs []vmJob, ch chan<- ProcEvent) {
+	defer close(ch)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	worst := 0
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j vmJob) {
+			defer wg.Done()
+			code := streamProcLines(buildVMCmd(cfg, j.args), j.tag, ch)
+			if code != 0 {
+				mu.Lock()
+				worst = code
+				mu.Unlock()
+			}
+		}(j)
+	}
+	wg.Wait()
+	ch <- ProcEvent{Done: true, Code: worst}
+}
+
+// nextWorkerNames returns n consecutive VM names starting from base. If base ends
+// in digits (e.g. "ollama-worker-04") the numeric suffix is incremented while
+// preserving zero-pad width; otherwise "-01".."-NN" is appended.
+func nextWorkerNames(base string, n int) []string {
+	if n < 1 {
+		n = 1
+	}
+	i := len(base)
+	for i > 0 && base[i-1] >= '0' && base[i-1] <= '9' {
+		i--
+	}
+	names := make([]string, 0, n)
+	if i == len(base) {
+		for k := 0; k < n; k++ {
+			names = append(names, fmt.Sprintf("%s-%02d", base, k+1))
+		}
+		return names
+	}
+	prefix, digits := base[:i], base[i:]
+	width := len(digits)
+	start, _ := strconv.Atoi(digits)
+	for k := 0; k < n; k++ {
+		names = append(names, fmt.Sprintf("%s%0*d", prefix, width, start+k))
+	}
+	return names
 }
 
 // NextName calls the helper synchronously to get the next free indexed name.

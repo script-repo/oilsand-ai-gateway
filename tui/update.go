@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -1165,6 +1166,132 @@ func (m *model) startLocalOlla() tea.Cmd {
 	return waitProc(m.procCh)
 }
 
+// startWorkerBatch provisions `count` workers in parallel (pattern-b
+// --no-register), then registers them with the gateway in a single batched pass
+// (see handleBatchDone). Names auto-increment from `name` (or the next free
+// ollama-worker-NN when blank).
+func (m *model) startWorkerBatch(count int, model, name string) tea.Cmd {
+	if m.procBusy {
+		m.notice = "a deploy/delete is already running"
+		return nil
+	}
+	base := name
+	if base == "" {
+		nm, err := NextName(m.pcCfg, "worker")
+		if err != nil {
+			m.notice = "could not compute worker names: " + err.Error()
+			return nil
+		}
+		base = nm
+	}
+	names := nextWorkerNames(base, count)
+	jobs := make([]vmJob, 0, len(names))
+	for _, n := range names {
+		args := []string{"pattern-b", "--no-register", "--model", model, "--olla-url", m.gateway, "--vm-name", n}
+		args = append(args, m.deployFlags()...)
+		jobs = append(jobs, vmJob{tag: n, args: args})
+	}
+	d := withDeployDefaults(m.deployCfg)
+	m.batch = deployBatch{
+		active:  true,
+		phase:   1,
+		gateway: m.gateway,
+		vmUser:  d.VMUser,
+		vmPass:  d.VMPassword,
+		total:   len(names),
+	}
+	m.procBusy = true
+	m.section = secNutanix
+	m.logLines = append(m.logLines,
+		fmt.Sprintf(">>> deploying %d workers in parallel (%s … %s); will register as a batch when done",
+			len(names), names[0], names[len(names)-1]))
+	m.renderLog()
+	m.procCh = make(chan ProcEvent, 256)
+	go RunVMScripts(m.pcCfg, jobs, m.procCh)
+	return waitProc(m.procCh)
+}
+
+// handleBatchDone advances a multi-worker deploy across its two phases: after
+// parallel provisioning it kicks off the single batched registration; after
+// registration it finalizes and refreshes the inventory.
+func (m model) handleBatchDone(ev ProcEvent) (tea.Model, tea.Cmd) {
+	if m.batch.phase == 1 {
+		if len(m.batch.endpoints) == 0 {
+			m.batch = deployBatch{}
+			m.procBusy = false
+			m.logLines = append(m.logLines, fmt.Sprintf("<<< multi-worker deploy failed: no workers provisioned (rc=%d)", ev.Code))
+			m.notice = "multi-worker deploy failed — see Output"
+			m.renderLog()
+			if m.pcCfg != nil {
+				return m, vmsCmd(m.pcCfg)
+			}
+			return m, nil
+		}
+		m.batch.phase = 2
+		if ev.Code != 0 {
+			m.logLines = append(m.logLines, fmt.Sprintf(">>> some workers failed (rc=%d); registering the %d that succeeded", ev.Code, len(m.batch.endpoints)))
+		} else {
+			m.logLines = append(m.logLines, fmt.Sprintf(">>> all workers provisioned; registering %d endpoint(s) with the gateway", len(m.batch.endpoints)))
+		}
+		m.renderLog()
+		regArgs := []string{"register-endpoints", "--olla-url", m.batch.gateway,
+			"--vm-user", m.batch.vmUser, "--vm-password", m.batch.vmPass}
+		for _, ep := range m.batch.endpoints {
+			regArgs = append(regArgs, "--endpoint",
+				fmt.Sprintf("name=%s,url=%s,type=%s,priority=%d", ep.Name, ep.URL, ep.Type, ep.Priority))
+		}
+		m.procCh = make(chan ProcEvent, 64)
+		// cfg=nil: register-endpoints does no Prism work and rejects --prism-url.
+		go RunVMScript(nil, regArgs, m.procCh)
+		return m, waitProc(m.procCh)
+	}
+
+	// phase 2 (registration) finished — finalize.
+	n := len(m.batch.endpoints)
+	m.batch = deployBatch{}
+	m.procBusy = false
+	if ev.Code == 0 {
+		m.logLines = append(m.logLines, "<<< multi-worker deploy complete")
+		m.notice = fmt.Sprintf("deployed and registered %d worker(s)", n)
+	} else {
+		m.logLines = append(m.logLines, fmt.Sprintf("<<< batch registration failed (rc=%d)", ev.Code))
+		m.notice = fmt.Sprintf("workers deployed but registration failed (rc=%d)", ev.Code)
+	}
+	m.renderLog()
+	var cmds []tea.Cmd
+	if m.pcCfg != nil {
+		cmds = append(cmds, vmsCmd(m.pcCfg))
+	}
+	if m.client != nil {
+		cmds = append(cmds, statusCmd(m.client))
+	}
+	if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
+		cmds = append(cmds, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass))
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// parseBatchEndpoint extracts an endpoint from an "OILSAND_ENDPOINT <json>" log
+// line (the tag prefix, if any, is ignored).
+func parseBatchEndpoint(line string) (batchEndpoint, bool) {
+	const marker = "OILSAND_ENDPOINT "
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return batchEndpoint{}, false
+	}
+	var ep batchEndpoint
+	if err := json.Unmarshal([]byte(line[i+len(marker):]), &ep); err != nil || ep.Name == "" || ep.URL == "" {
+		return batchEndpoint{}, false
+	}
+	if ep.Type == "" {
+		ep.Type = "ollama"
+	}
+	if ep.Priority == 0 {
+		ep.Priority = 100
+	}
+	return ep, true
+}
+
 func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 	if ev.Line != "" {
 		m.logLines = append(m.logLines, ev.Line)
@@ -1172,8 +1299,16 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			m.logLines = m.logLines[len(m.logLines)-1000:]
 		}
 		m.renderLog()
+		if m.batch.active && m.batch.phase == 1 {
+			if ep, ok := parseBatchEndpoint(ev.Line); ok {
+				m.batch.endpoints = append(m.batch.endpoints, ep)
+			}
+		}
 	}
 	if ev.Done {
+		if m.batch.active {
+			return m.handleBatchDone(ev)
+		}
 		m.procBusy = false
 		wasLocalOlla := m.localOllaPending
 		m.localOllaPending = false

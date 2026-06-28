@@ -187,12 +187,14 @@ func (m *model) openDeploy(role string) tea.Cmd {
 		return m.openNutanixCfg()
 	}
 	def := m.effDefaultModel()
-	m.fRole, m.fName, m.fModel = role, "", def
+	m.fRole, m.fName, m.fModel, m.fCount = role, "", def, "1"
 	m.modal = modalDeploy
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Key("role").Title("Role").
 			Options(huh.NewOptions("worker", "gateway")...).Value(&m.fRole),
 		huh.NewInput().Key("vmname").Title("VM name").Description("blank = auto-increment (ollama-worker-NN)").Value(&m.fName),
+		huh.NewInput().Key("count").Title("Instances").
+			Description("worker only · number of workers to deploy in parallel").Value(&m.fCount),
 		huh.NewInput().Key("model").Title("Model").Description("worker only · defaults to the current default model").
 			Placeholder(def).Value(&m.fModel),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
@@ -422,8 +424,12 @@ func (m *model) onFormComplete() tea.Cmd {
 			m.notice = "connect to the target Olla gateway first"
 			return nil
 		}
-		args := []string{"pattern-b", "--model",
-			orDefault(m.fstr("model"), m.effDefaultModel()), "--olla-url", m.gateway}
+		model := orDefault(m.fstr("model"), m.effDefaultModel())
+		count := atoiOr(m.fstr("count"), 1)
+		if count > 1 {
+			return m.startWorkerBatch(count, model, name)
+		}
+		args := []string{"pattern-b", "--model", model, "--olla-url", m.gateway}
 		args = append(args, m.deployFlags()...)
 		if name != "" {
 			args = append(args, "--vm-name", name)

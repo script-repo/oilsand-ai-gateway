@@ -772,10 +772,17 @@ def finish_pattern_b(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
 
     model_present = args.model in tags_out
 
-    # Register with the existing Olla instance.
+    # Register with the existing Olla instance (unless deferred for batch
+    # registration: when deploying many workers in parallel each one would race
+    # on the gateway's olla.yaml, so the caller registers them all in one pass).
     worker_url = f"http://{ip}:{OLLAMA_PORT}"
     endpoint = {"name": vm_name, "url": worker_url, "type": "ollama", "priority": 100}
-    registered = register_with_olla(olla_ssh_host, args, endpoint, olla_url)
+    if getattr(args, "no_register", False):
+        registered = False
+        print("OILSAND_ENDPOINT " + json.dumps(endpoint))
+        log(f"deferred registration for {vm_name}; endpoint emitted for batch registration")
+    else:
+        registered = register_with_olla(olla_ssh_host, args, endpoint, olla_url)
 
     report = {
         "pattern": "B",
@@ -832,6 +839,68 @@ def register_with_olla(olla_ssh_host: str, args: argparse.Namespace, endpoint: d
         ssh.close()
 
 
+def register_endpoints_batch(args: argparse.Namespace, endpoints: list[dict]) -> bool:
+    """Register many worker endpoints with Olla in a single pass.
+
+    Used after a parallel multi-worker deploy: the per-worker provisioning runs
+    concurrently with --no-register, then this performs exactly one olla.yaml
+    render + scp + Olla restart for the whole batch, avoiding the read-modify-
+    write race that concurrent register_with_olla calls would hit.
+    """
+    olla_url, olla_ssh_host = _resolve_olla_target(args)
+    log(f"batch-registering {len(endpoints)} endpoint(s) with Olla at {olla_url} (via SSH to {olla_ssh_host})")
+    state = load_state()
+    registry = state.setdefault("olla_endpoints", {})
+    current = registry.get(olla_url, [])
+    for ep in endpoints:
+        current = upsert_endpoint(current, ep)
+    registry[olla_url] = current
+    save_state(state)
+
+    config = render_olla_config(current)
+    ssh = Ssh(olla_ssh_host, args.vm_user, args.vm_password)
+    ssh.connect(timeout_s=120)
+    try:
+        ssh.put_text(config, "/tmp/olla.yaml")
+        rc, _out, _err = ssh.run(
+            "sudo install -o olla -g olla -m 0644 /tmp/olla.yaml /etc/olla/olla.yaml "
+            "&& sudo systemctl restart olla",
+        )
+        if rc != 0:
+            log("warning: failed to update/restart Olla on the gateway VM")
+            return False
+        time.sleep(5)
+        check_rc, _o, _e = ssh.run(
+            f"curl -fsS http://127.0.0.1:{OLLA_PORT}/internal/health "
+            f"|| curl -fsS http://127.0.0.1:{OLLA_PORT}/internal/status",
+            stream=False,
+        )
+        return check_rc == 0
+    finally:
+        ssh.close()
+
+
+def parse_endpoint_arg(spec: str) -> dict:
+    """Parse a 'name=<n>,url=<u>[,type=<t>][,priority=<p>]' endpoint spec."""
+    fields: dict = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            fatal(f"invalid --endpoint segment '{part}' (expected key=value)")
+        key, val = part.split("=", 1)
+        fields[key.strip()] = val.strip()
+    if not fields.get("name") or not fields.get("url"):
+        fatal(f"invalid --endpoint '{spec}': name= and url= are required")
+    return {
+        "name": fields["name"],
+        "url": fields["url"],
+        "type": fields.get("type", "ollama"),
+        "priority": int(fields.get("priority", 100)),
+    }
+
+
 # --- CLI --------------------------------------------------------------------
 def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--prism-url", default=os.environ.get("PRISM_CENTRAL_URL"),
@@ -881,6 +950,9 @@ def main() -> int:
                     help="Existing Olla base URL to register with (default: pattern-a VM from state)")
     pb.add_argument("--olla-ssh-host", default=None,
                     help="SSH host of the Olla gateway VM (default: derived from --olla-url / state)")
+    pb.add_argument("--no-register", action="store_true",
+                    help="Provision + install only; skip Olla registration and print "
+                         "'OILSAND_ENDPOINT <json>' (used for batched parallel deploys)")
 
     # install-only variants: skip provisioning and run the SSH install against an
     # already-running VM (e.g. one created out-of-band via the Nutanix MCP).
@@ -913,13 +985,30 @@ def main() -> int:
     nn.add_argument("--role", choices=["worker", "gateway"], default="worker")
     nn.add_argument("--prefix", default=None, help="Override the name prefix (e.g. ollama-worker-)")
 
+    re_ = sub.add_parser("register-endpoints",
+                         help="Register one or more worker endpoints with Olla in a single batch")
+    re_.add_argument("--endpoint", action="append", default=[], required=True,
+                     help="Endpoint spec 'name=<n>,url=<u>[,type=<t>][,priority=<p>]' (repeatable)")
+    re_.add_argument("--olla-url", default=None,
+                     help="Existing Olla base URL to register with (default: pattern-a VM from state)")
+    re_.add_argument("--olla-ssh-host", default=None,
+                     help="SSH host of the Olla gateway VM (default: derived from --olla-url / state)")
+    re_.add_argument("--vm-user", default=DEFAULT_VM_USER)
+    re_.add_argument("--vm-password", default=DEFAULT_VM_PASSWORD)
+
     args = parser.parse_args()
 
     # Commands that SSH into the guest need the cloud-init password. No default
     # is baked in, so require it explicitly (flag or OILSAND_VM_PASSWORD).
-    if args.command in ("pattern-a", "pattern-b", "install-a", "install-b") and not getattr(args, "vm_password", ""):
+    if args.command in ("pattern-a", "pattern-b", "install-a", "install-b", "register-endpoints") and not getattr(args, "vm_password", ""):
         fatal("VM password required: pass --vm-password or set OILSAND_VM_PASSWORD "
               "(no default password is shipped)")
+
+    if args.command == "register-endpoints":
+        endpoints = [parse_endpoint_arg(spec) for spec in args.endpoint]
+        ok = register_endpoints_batch(args, endpoints)
+        print(json.dumps({"registered": ok, "count": len(endpoints)}, indent=2))
+        return 0 if ok else 1
 
     # Provisioning needs explicit placement; no lab defaults are baked in.
     if args.command in ("pattern-a", "pattern-b"):

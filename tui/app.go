@@ -181,6 +181,7 @@ type model struct {
 	procCh           chan ProcEvent
 	procBusy         bool
 	localOllaPending bool // the running proc is a local Olla install; connect on success
+	batch            deployBatch // active multi-worker parallel deploy, if any
 	logLines         []string
 
 	// access
@@ -201,6 +202,7 @@ type model struct {
 	fRole    string
 	fName    string
 	fModel   string
+	fCount   string
 	// nutanix settings form values
 	fPCHost  string
 	fPCPort  string
@@ -415,6 +417,28 @@ type sshResultMsg struct {
 type endpointsMsg struct {
 	eps []endpointEntry
 	err error
+}
+
+// batchEndpoint is a worker endpoint emitted (as "OILSAND_ENDPOINT <json>") by a
+// parallel `pattern-b --no-register` run, collected for batched registration.
+type batchEndpoint struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Type     string `json:"type"`
+	Priority int    `json:"priority"`
+}
+
+// deployBatch tracks a multi-worker parallel deploy: phase 1 provisions N workers
+// concurrently (collecting their endpoints), phase 2 registers them all with the
+// gateway in a single olla.yaml write to avoid races.
+type deployBatch struct {
+	active    bool
+	phase     int // 1 = provisioning, 2 = registering
+	gateway   string
+	vmUser    string
+	vmPass    string
+	total     int
+	endpoints []batchEndpoint
 }
 type consoleReadyMsg struct {
 	user  string

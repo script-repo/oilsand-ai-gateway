@@ -108,7 +108,10 @@ Sections:
   active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
   currently taking the most load.
 * **Nutanix** — Prism Central server + managed gateway/worker VMs (filterable list). `g` deploy a
-  gateway, `w` deploy a worker (auto-named, registered with the connected gateway), `o` install
+  gateway, `w` deploy a worker (auto-named, registered with the connected gateway). The worker
+  deploy modal has an **Instances** field: set it above `1` to provision that many workers in
+  parallel (names auto-increment, e.g. `ollama-worker-04..06`); they all register with the gateway
+  in a single batched `olla.yaml` write so concurrent deploys don't race. `o` install
   Olla on **this** server (no Nutanix VM — see below), `n` show the next free name, `r` refresh,
   `x` delete the selected VM. Deploys open a Huh modal, then run `nutanix_olla_vm.py` as a
   subprocess and stream output into the log pane. The PC API key is read at runtime from
@@ -181,6 +184,19 @@ Pattern B (registers with the Pattern A Olla recorded in `~/.oilsand-ai-gateway/
 scripts/nutanix_olla_vm.py pattern-b --vm-name ollama-worker-01 --model rnj-1
 # or register with a specific Olla instance:
 scripts/nutanix_olla_vm.py pattern-b --model rnj-1 --olla-url http://gateway-host:40114
+```
+
+To deploy many workers in parallel without each one racing on the gateway config, provision them
+with `--no-register` (which prints `OILSAND_ENDPOINT <json>` instead of touching `olla.yaml`), then
+register the whole batch in one pass — this is exactly what the TUI's **Instances** field does:
+
+```bash
+scripts/nutanix_olla_vm.py pattern-b --no-register --vm-name ollama-worker-04 --model rnj-1 --olla-url http://gateway-host:40114
+scripts/nutanix_olla_vm.py pattern-b --no-register --vm-name ollama-worker-05 --model rnj-1 --olla-url http://gateway-host:40114
+# ...then one batched registration (single olla.yaml write + restart):
+scripts/nutanix_olla_vm.py register-endpoints --olla-url http://gateway-host:40114 \
+  --endpoint name=ollama-worker-04,url=http://10.0.0.4:11434 \
+  --endpoint name=ollama-worker-05,url=http://10.0.0.5:11434
 ```
 
 There are **no baked-in placement defaults**. In the TUI, the Nutanix settings form populates
