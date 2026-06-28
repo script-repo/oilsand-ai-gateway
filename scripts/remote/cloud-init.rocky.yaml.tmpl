@@ -1,7 +1,8 @@
 #cloud-config
 # Cloud-init userData for the Rocky Linux generic cloud image.
-# Placeholders ({{HOSTNAME}}, {{PASSWORD}}) are substituted by nutanix_olla_vm.py
-# before the document is base64-encoded into the VM guest customization payload.
+# Placeholders ({{HOSTNAME}}, {{USERNAME}}, {{PASSWORD}}) are substituted by
+# nutanix_olla_vm.py before the document is base64-encoded into the VM guest
+# customization payload.
 hostname: {{HOSTNAME}}
 fqdn: {{HOSTNAME}}
 preserve_hostname: false
@@ -10,8 +11,11 @@ preserve_hostname: false
 ssh_pwauth: true
 disable_root: false
 
+# Keep the image's built-in default user (e.g. rocky) and add the requested one
+# with passwordless sudo so the installer scripts can run sudo without a TTY.
 users:
-  - name: rocky
+  - default
+  - name: {{USERNAME}}
     groups: [wheel]
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     shell: /bin/bash
@@ -20,7 +24,7 @@ users:
 chpasswd:
   expire: false
   list: |
-    rocky:{{PASSWORD}}
+    {{USERNAME}}:{{PASSWORD}}
 
 # The generic cloud image ships a ~10 GiB root; grow it to fill the 50 GiB disk.
 growpart:

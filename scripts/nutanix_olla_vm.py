@@ -384,9 +384,13 @@ def vm_summary(vm: dict) -> dict:
 
 
 # --- cloud-init + VM body ---------------------------------------------------
-def render_cloud_init(hostname: str, password: str) -> str:
+def render_cloud_init(hostname: str, username: str, password: str) -> str:
     tmpl = (REMOTE_DIR / "cloud-init.rocky.yaml.tmpl").read_text()
-    return tmpl.replace("{{HOSTNAME}}", hostname).replace("{{PASSWORD}}", password)
+    return (
+        tmpl.replace("{{HOSTNAME}}", hostname)
+        .replace("{{USERNAME}}", username)
+        .replace("{{PASSWORD}}", password)
+    )
 
 
 def build_vm_body(
@@ -635,7 +639,7 @@ def provision_vm(pc: PrismClient, args: argparse.Namespace, vm_name: str) -> dic
     log(f"cluster '{args.cluster_name}' -> {cluster_ext_id}")
     log(f"subnet '{args.subnet_name}' -> {subnet_ext_id}")
 
-    cloud_init = render_cloud_init(vm_name, args.vm_password)
+    cloud_init = render_cloud_init(vm_name, args.vm_user, args.vm_password)
     body = build_vm_body(
         name=vm_name,
         cluster_ext_id=cluster_ext_id,
