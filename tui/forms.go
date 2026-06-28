@@ -370,6 +370,21 @@ func (m *model) openUpdateAllConfirm() tea.Cmd {
 	return m.form.Init()
 }
 
+// openCustomDeploy collects a new custom deployment type: a friendly name and
+// the URL of a setup script run on the VM (curl | sudo bash) after it boots.
+func (m *model) openCustomDeploy() tea.Cmd {
+	m.fCustName, m.fCustURL = "", ""
+	m.modal = modalCustomDeploy
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewInput().Key("custname").Title("Deployment name").
+			Placeholder("e.g. postgres-node").Value(&m.fCustName),
+		huh.NewInput().Key("custurl").Title("Setup script URL").
+			Description("run on the new VM after boot: curl -fsSL <url> | sudo bash").
+			Placeholder("https://example.com/setup.sh").Value(&m.fCustURL),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
 // openAgentHostPick lets the user choose which worker an agent is opened/deployed
 // on (item: "specify the worker that hermes or openclaw is deployed on").
 func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
@@ -627,6 +642,20 @@ func (m *model) onFormComplete() tea.Cmd {
 			return nil
 		}
 		return m.startUpdatePlan(m.updateAllPlan(), "update all")
+
+	case modalCustomDeploy:
+		name := m.fstr("custname")
+		url := m.fstr("custurl")
+		if name == "" || url == "" {
+			m.notice = "deployment name and script URL are required"
+			return nil
+		}
+		m.customDeploys = append(m.customDeploys, customDeploy{Name: name, ScriptURL: url})
+		_ = saveCustomDeploys(m.tokFile, m.customDeploys)
+		m.refreshCustomList()
+		m.nutanixCustom = true
+		m.notice = "added custom deployment: " + name
+		return nil
 	}
 	return nil
 }

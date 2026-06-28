@@ -292,6 +292,8 @@ func (m *model) applyLayout(w, h int) {
 
 	// The Update list shares the layout with its Output pane, like Nutanix.
 	m.updateList.SetSize(m.contentW, vmsH)
+	// The custom-deploy submenu also shares the Nutanix layout (list + Output).
+	m.customList.SetSize(m.contentW, vmsH)
 
 	m.composer.SetWidth(m.contentW)
 	chatH := maxInt(m.contentH-6, 3)
@@ -355,6 +357,9 @@ func (m *model) activeList() *list.Model {
 	case secModels:
 		return &m.modelsList
 	case secNutanix:
+		if m.nutanixCustom {
+			return &m.customList
+		}
 		return &m.vmsList
 	case secAgents:
 		return &m.agentsList
@@ -571,6 +576,21 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case secNutanix:
+		if m.nutanixCustom {
+			switch k {
+			case "esc", "left", "h":
+				m.nutanixCustom = false
+				return m, nil
+			case "enter":
+				return m, m.deploySelectedCustom()
+			case "x", "delete":
+				m.deleteSelectedCustom()
+				return m, nil
+			}
+			nl, cmd := m.customList.Update(msg)
+			m.customList = nl
+			return m, cmd
+		}
 		switch k {
 		case "esc", "left", "h":
 			m.leaveContent()
@@ -579,6 +599,9 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, m.openDeploy("gateway")
 		case "w":
 			return m, m.openDeploy("worker")
+		case "c":
+			m.nutanixCustom = true
+			return m, nil
 		case "o":
 			return m, m.startLocalOlla()
 		case "e":

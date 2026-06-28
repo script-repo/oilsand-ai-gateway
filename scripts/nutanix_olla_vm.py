@@ -37,6 +37,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import uuid
@@ -601,6 +602,7 @@ def upsert_endpoint(endpoints: list[dict], endpoint: dict) -> list[dict]:
 
 WORKER_PREFIX = "ollama-worker-"
 GATEWAY_PREFIX = "olla-gateway-"
+CUSTOM_PREFIX = "custom-"
 
 
 def next_indexed_name(pc: PrismClient, prefix: str, width: int = 2) -> str:
@@ -735,6 +737,43 @@ def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
     if not report["olla_service_active"]:
         fatal("Olla service is not active")
     log("Pattern A complete: Olla is installed and serving.")
+
+
+# --- custom deployment ------------------------------------------------------
+def pattern_custom(pc: PrismClient, args: argparse.Namespace) -> None:
+    """Provision a VM from the configured image, then run a user-supplied setup
+    script (downloaded from a URL) on the guest. No Olla/Ollama assumptions."""
+    prefix = getattr(args, "name_prefix", None) or CUSTOM_PREFIX
+    vm_name = args.vm_name or next_indexed_name(pc, prefix)
+    log(f"custom VM name: {vm_name}")
+    result = provision_vm(pc, args, vm_name)
+    finish_pattern_custom(result["ip"], args, vm_name, vm_ext_id=result["vm_ext_id"])
+
+
+def finish_pattern_custom(ip: str, args: argparse.Namespace, vm_name: str,
+                          vm_ext_id: str | None = None) -> None:
+    url = args.script_url
+    ssh = Ssh(ip, args.vm_user, args.vm_password)
+    ssh.connect()
+    ssh.wait_cloud_init()
+    log(f"running setup script from {url}")
+    cmd = f"curl -fsSL {shlex.quote(url)} | sudo bash"
+    rc, _out, _err = ssh.run(cmd)
+    ssh.close()
+
+    report = {
+        "pattern": "custom",
+        "vm_name": vm_name,
+        "vm_ext_id": vm_ext_id,
+        "ip": ip,
+        "script_url": url,
+        "script_exit": rc,
+    }
+    print("\n=== Custom deployment report ===")
+    print(json.dumps(report, indent=2))
+    if rc != 0:
+        fatal(f"setup script failed on the guest (exit {rc})")
+    log("Custom deployment complete.")
 
 
 # --- pattern B --------------------------------------------------------------
@@ -954,6 +993,14 @@ def main() -> int:
                     help="Provision + install only; skip Olla registration and print "
                          "'OILSAND_ENDPOINT <json>' (used for batched parallel deploys)")
 
+    pcst = sub.add_parser("pattern-custom",
+                          help="Provision a VM from the image, then run a setup script from a URL")
+    add_common_args(pcst)
+    pcst.add_argument("--script-url", required=True,
+                      help="URL of a setup script run on the guest after boot: curl -fsSL <url> | sudo bash")
+    pcst.add_argument("--name-prefix", default=None,
+                      help="Auto-increment VM names from this prefix when --vm-name is omitted")
+
     # install-only variants: skip provisioning and run the SSH install against an
     # already-running VM (e.g. one created out-of-band via the Nutanix MCP).
     ia = sub.add_parser("install-a", help="Install Olla on an existing VM (no provisioning)")
@@ -1000,7 +1047,7 @@ def main() -> int:
 
     # Commands that SSH into the guest need the cloud-init password. No default
     # is baked in, so require it explicitly (flag or OILSAND_VM_PASSWORD).
-    if args.command in ("pattern-a", "pattern-b", "install-a", "install-b", "register-endpoints") and not getattr(args, "vm_password", ""):
+    if args.command in ("pattern-a", "pattern-b", "pattern-custom", "install-a", "install-b", "register-endpoints") and not getattr(args, "vm_password", ""):
         fatal("VM password required: pass --vm-password or set OILSAND_VM_PASSWORD "
               "(no default password is shipped)")
 
@@ -1011,7 +1058,7 @@ def main() -> int:
         return 0 if ok else 1
 
     # Provisioning needs explicit placement; no lab defaults are baked in.
-    if args.command in ("pattern-a", "pattern-b"):
+    if args.command in ("pattern-a", "pattern-b", "pattern-custom"):
         prov_missing = [name for name, val in (
             ("--image-name", getattr(args, "image_name", "")),
             ("--cluster-name", getattr(args, "cluster_name", "")),
@@ -1040,6 +1087,8 @@ def main() -> int:
         pattern_a(pc, args)
     elif args.command == "pattern-b":
         pattern_b(pc, args)
+    elif args.command == "pattern-custom":
+        pattern_custom(pc, args)
     elif args.command == "delete":
         vm = pc.find_vm_by_name(args.name)
         if not vm:

@@ -379,7 +379,23 @@ func (m model) viewLoad() string {
 
 // ---- section: nutanix ------------------------------------------------------
 
+func (m model) viewCustomDeploys() string {
+	busy := dimStyle.Render("enter deploy/add · x delete · esc back")
+	if m.procBusy {
+		busy = m.spin.View() + " " + warnStyle.Render("running deploy…")
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		labelStyle.Render("Custom deployments")+dimStyle.Render("  (provision the configured image, then run a setup script)"),
+		m.customList.View(),
+		labelStyle.Render("Output")+"  "+busy,
+		m.logVP.View(),
+	)
+}
+
 func (m model) viewNutanix() string {
+	if m.nutanixCustom {
+		return m.viewCustomDeploys()
+	}
 	if m.pcCfg == nil {
 		msg := "Prism Central is not configured (press e to set host + credentials,\nor add PC_HOST / PC_API_KEY to the nutanix-v4-mcp entry in ~/.cursor/mcp.json)."
 		if localOllaSupported() {
@@ -387,7 +403,7 @@ func (m model) viewNutanix() string {
 		}
 		return dimStyle.Render(msg)
 	}
-	busy := dimStyle.Render("g gateway · w worker · o Olla here · e settings · x delete · s ssh · n next-name · r refresh")
+	busy := dimStyle.Render("g gateway · w worker · c custom · o Olla here · e settings · x delete · s ssh · n next-name · r refresh")
 	if m.procBusy {
 		busy = m.spin.View() + " " + warnStyle.Render("running deploy/delete…")
 	}
@@ -444,18 +460,19 @@ func (m model) viewAccess() string {
 
 func (m model) viewModal() string {
 	titles := map[modalKind]string{
-		modalConnect:    "Connect to Olla gateway",
-		modalEndpoint:   "Add Ollama endpoint",
-		modalPull:       "Pull a model",
-		modalDeploy:     "Deploy Nutanix VM",
-		modalCatalog:    "Browse & download models",
-		modalNutanixCfg: "Nutanix settings",
-		modalAgentHost:  "Choose worker",
-		modalHermesCfg:  "Hermes gateway / Telegram",
-		modalUpdateImage: "Update deployment image",
-		modalOSUpdate:    "Update OS on hosts",
-		modalOllaKey:     "Update Ollama cloud keys",
-		modalUpdateAll:   "Update everything",
+		modalConnect:      "Connect to Olla gateway",
+		modalEndpoint:     "Add Ollama endpoint",
+		modalPull:         "Pull a model",
+		modalDeploy:       "Deploy Nutanix VM",
+		modalCatalog:      "Browse & download models",
+		modalNutanixCfg:   "Nutanix settings",
+		modalAgentHost:    "Choose worker",
+		modalHermesCfg:    "Hermes gateway / Telegram",
+		modalUpdateImage:  "Update deployment image",
+		modalOSUpdate:     "Update OS on hosts",
+		modalOllaKey:      "Update Ollama cloud keys",
+		modalUpdateAll:    "Update everything",
+		modalCustomDeploy: "Add custom deployment",
 	}
 	inner := modalTitle.Render(titles[m.modal]) + "\n\n" + m.form.View()
 	box := modalBox.Render(inner)
@@ -493,7 +510,11 @@ func (m model) shortHelp() []key.Binding {
 	case secAgents:
 		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.EditCfg, m.km.Filter, m.km.Back}
 	case secNutanix:
-		mid = []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.Console, m.km.NextName, m.km.Back}
+		if m.nutanixCustom {
+			mid = []key.Binding{m.km.Open, m.km.Delete, m.km.Back}
+		} else {
+			mid = []key.Binding{m.km.Deploy, m.km.Worker, m.km.Custom, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.Console, m.km.NextName, m.km.Back}
+		}
 	case secAccess:
 		mid = []key.Binding{m.km.Token, m.km.ClearToken, m.km.Back}
 	case secUpdate:

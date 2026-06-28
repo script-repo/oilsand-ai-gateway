@@ -111,7 +111,8 @@ Sections:
   gateway, `w` deploy a worker (auto-named, registered with the connected gateway). The worker
   deploy modal has an **Instances** field: set it above `1` to provision that many workers in
   parallel (names auto-increment, e.g. `ollama-worker-04..06`); they all register with the gateway
-  in a single batched `olla.yaml` write so concurrent deploys don't race. `o` install
+  in a single batched `olla.yaml` write so concurrent deploys don't race. `c` opens the
+  **custom deployments** submenu (see below), `o` install
   Olla on **this** server (no Nutanix VM — see below), `n` show the next free name, `r` refresh,
   `x` delete the selected VM. Deploys open a Huh modal, then run `nutanix_olla_vm.py` as a
   subprocess and stream output into the log pane. The PC API key is read at runtime from
@@ -155,6 +156,29 @@ default-route NIC, so the gateway is reachable from other machines). Linux only,
 
 When the gateway is this local host, agents that run on the gateway (for example Crush) are
 installed and launched directly — no SSH password is required for them.
+
+### Custom deployment types
+
+Beyond the built-in gateway/worker patterns, you can define your own deployment types. Press
+`c` in the **Nutanix** section to open the custom-deployments submenu:
+
+* The first row, **+ add deployment**, opens a form asking for a **name** and a **setup script
+  URL**. Saved configs are listed below it and persist in `~/.oilsand-ai-gateway/tui.json`.
+* Highlight a saved config and press **enter** to deploy: the TUI provisions a VM from the
+  Nutanix settings image/cluster/subnet, waits for cloud-init, then runs your script on the
+  guest as `curl -fsSL <url> | sudo bash`. VM names auto-increment from the deployment name
+  (e.g. `postgres-node-01`, `postgres-node-02`).
+* Press **x** on a saved config to delete it. **esc** returns to the VM list.
+
+This maps to the helper's `pattern-custom` subcommand:
+
+```bash
+scripts/nutanix_olla_vm.py pattern-custom \
+  --script-url https://example.com/setup.sh \
+  --name-prefix postgres-node- \
+  --image-name <image> --cluster-name <cluster> --subnet-name <subnet> \
+  --vm-password "$OILSAND_VM_PASSWORD"
+```
 
 ## VM (AHV) deployment — Patterns A and B
 

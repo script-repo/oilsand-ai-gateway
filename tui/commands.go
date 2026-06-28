@@ -350,15 +350,25 @@ func hostFromURL(u string) string {
 
 // tuiSettings is the small persisted state in ~/.oilsand-ai-gateway/tui.json.
 type tuiSettings struct {
-	Token        string            `json:"olla_token"`
-	DefaultModel string            `json:"default_model"`
-	Gateway      string            `json:"gateway"`      // Olla gateway URL (set on first launch)
-	SSHUser      string            `json:"ssh_user"`     // SSH user for the gateway VM
-	SSHPass      string            `json:"ssh_password"` // SSH password for the gateway VM
-	Deploy       deploySettings    `json:"deploy"`
-	PC           pcOverride        `json:"prism_central"`
-	Agents       map[string]string `json:"agents"` // agent name -> deployed host
-	Hermes       hermesSettings    `json:"hermes"`
+	Token         string            `json:"olla_token"`
+	DefaultModel  string            `json:"default_model"`
+	Gateway       string            `json:"gateway"`      // Olla gateway URL (set on first launch)
+	SSHUser       string            `json:"ssh_user"`     // SSH user for the gateway VM
+	SSHPass       string            `json:"ssh_password"` // SSH password for the gateway VM
+	Deploy        deploySettings    `json:"deploy"`
+	PC            pcOverride        `json:"prism_central"`
+	Agents        map[string]string `json:"agents"` // agent name -> deployed host
+	Hermes        hermesSettings    `json:"hermes"`
+	CustomDeploys []customDeploy    `json:"custom_deploys"` // user-defined deployment types
+}
+
+// customDeploy is a user-defined Nutanix deployment type: a friendly name plus
+// the URL of a setup script run on the new VM (curl | sudo bash) after the image
+// boots. Deploying one provisions a VM from the configured image, then runs the
+// script.
+type customDeploy struct {
+	Name      string `json:"name"`
+	ScriptURL string `json:"script_url"`
 }
 
 // hermesSettings holds the one-time inputs that let Hermes deploys set up the
@@ -534,6 +544,13 @@ func saveDeployPC(path string, d deploySettings, pc pcOverride) error {
 	s := loadSettings(path)
 	s.Deploy = d
 	s.PC = pc
+	return saveSettings(path, s)
+}
+
+// saveCustomDeploys persists the user-defined custom deployment types.
+func saveCustomDeploys(path string, cds []customDeploy) error {
+	s := loadSettings(path)
+	s.CustomDeploys = cds
 	return saveSettings(path, s)
 }
 

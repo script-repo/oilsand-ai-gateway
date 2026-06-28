@@ -76,6 +76,7 @@ const (
 	modalOSUpdate
 	modalOllaKey
 	modalUpdateAll
+	modalCustomDeploy
 )
 
 type chatRole int
@@ -119,9 +120,9 @@ type model struct {
 	status    Status
 	models    []Model
 	vms       []VM
-	clusters  []string // PC clusters available for placement
-	images    []string // PC disk images available to clone
-	subnets   []string // PC subnets available for placement
+	clusters  []string        // PC clusters available for placement
+	images    []string        // PC disk images available to clone
+	subnets   []string        // PC subnets available for placement
 	endpoints []endpointEntry // cached gateway endpoints (for direct worker ops/console)
 
 	// derived metrics
@@ -148,6 +149,11 @@ type model struct {
 	vmsList    list.Model
 	agentsList list.Model
 	updateList list.Model
+	customList list.Model // user-defined custom deployment types (Nutanix submenu)
+
+	// custom deployment types (Nutanix submenu)
+	customDeploys []customDeploy
+	nutanixCustom bool // Nutanix section is showing the custom-deploy submenu
 
 	// agent registrations (agent name -> host it was deployed on)
 	agentReg     map[string]string
@@ -187,7 +193,7 @@ type model struct {
 	// proc (deploy/delete)
 	procCh           chan ProcEvent
 	procBusy         bool
-	localOllaPending bool // the running proc is a local Olla install; connect on success
+	localOllaPending bool        // the running proc is a local Olla install; connect on success
 	batch            deployBatch // active multi-worker parallel deploy, if any
 	logLines         []string
 
@@ -239,6 +245,9 @@ type model struct {
 	fOllaKey    string
 	fOllaTarget string
 	fUpdConfirm bool
+	// custom deployment form values
+	fCustName string
+	fCustURL  string
 
 	// hermes gateway / telegram config (persisted)
 	hermesCfg hermesSettings
@@ -313,33 +322,35 @@ func newModel(gateway, sshUser, sshPass string) model {
 	}
 
 	m := model{
-		gateway:    normalizeGateway(gateway),
-		sshUser:    orDefault(sshUser, "rocky"),
-		sshPass:    sshPass,
-		pcCfg:      pcCfg,
-		deployCfg:  withDeployDefaults(cleanedDeploy),
-		pcOver:     st.PC,
-		km:         newKeyMap(),
-		help:       hp,
-		spin:       sp,
-		glam:       newGlamour(80),
-		prog:       prog,
-		modelsList: mkList("Models"),
-		poolList:   mkList("Pool"),
-		vmsList:    mkList("VMs"),
-		agentsList: mkList("Agents"),
-		updateList: mkList("Update"),
-		chatVP:     viewport.New(80, 16),
-		logVP:      viewport.New(80, 8),
-		composer:   ta,
-		prevEpReq:  map[string]int{},
-		epDelta:    map[string]float64{},
-		tokFile:    tokFile,
-		token:      st.Token,
-		defModel:   st.DefaultModel,
-		usageAgg:   usage30(loadUsage(usagePath(tokFile))),
-		agentReg:   st.Agents,
-		hermesCfg:  st.Hermes,
+		gateway:       normalizeGateway(gateway),
+		sshUser:       orDefault(sshUser, "rocky"),
+		sshPass:       sshPass,
+		pcCfg:         pcCfg,
+		deployCfg:     withDeployDefaults(cleanedDeploy),
+		pcOver:        st.PC,
+		km:            newKeyMap(),
+		help:          hp,
+		spin:          sp,
+		glam:          newGlamour(80),
+		prog:          prog,
+		modelsList:    mkList("Models"),
+		poolList:      mkList("Pool"),
+		vmsList:       mkList("VMs"),
+		agentsList:    mkList("Agents"),
+		updateList:    mkList("Update"),
+		customList:    mkList("Custom deployments"),
+		chatVP:        viewport.New(80, 16),
+		logVP:         viewport.New(80, 8),
+		composer:      ta,
+		prevEpReq:     map[string]int{},
+		epDelta:       map[string]float64{},
+		tokFile:       tokFile,
+		token:         st.Token,
+		defModel:      st.DefaultModel,
+		usageAgg:      usage30(loadUsage(usagePath(tokFile))),
+		agentReg:      st.Agents,
+		hermesCfg:     st.Hermes,
+		customDeploys: st.CustomDeploys,
 	}
 	if m.agentReg == nil {
 		m.agentReg = map[string]string{}
@@ -359,9 +370,11 @@ func newModel(gateway, sshUser, sshPass string) model {
 		Foreground(colAccent).BorderForeground(colAccent)
 	compact.Styles.NormalTitle = compact.Styles.NormalTitle.Foreground(colText)
 	m.updateList.SetDelegate(compact)
+	m.customList.SetDelegate(compact)
 
 	m.refreshAgents()
 	m.refreshUpdateList()
+	m.refreshCustomList()
 	return m
 }
 
