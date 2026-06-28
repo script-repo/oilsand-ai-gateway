@@ -131,15 +131,6 @@ func waitProc(ch chan ProcEvent) tea.Cmd {
 	}
 }
 
-func deleteModelCmd(c *OllaClient, name string) tea.Cmd {
-	return func() tea.Msg {
-		if err := c.DeleteModel(name); err != nil {
-			return notifyMsg("delete failed: " + err.Error())
-		}
-		return notifyMsg("deleted model " + name)
-	}
-}
-
 func nextNameCmd(cfg *PCConfig, role string) tea.Cmd {
 	return func() tea.Msg {
 		name, err := NextName(cfg, role)

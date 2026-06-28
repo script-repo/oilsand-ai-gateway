@@ -692,18 +692,15 @@ func (m model) defaultModel() string {
 // ---- pull ------------------------------------------------------------------
 
 func (m *model) startPull(name string) tea.Cmd {
-	if m.client == nil {
-		m.notice = "connect to a gateway first"
+	// Olla is a load balancer and returns 501 ("model management operations not
+	// supported by proxy") for /api/pull, so pulls must hit each worker's Ollama
+	// directly. Fan out to the whole pool (same path as delete/set-default).
+	workers := workersFromEndpoints(m.endpoints)
+	if len(workers) == 0 {
+		m.notice = "no workers known yet — open Pool and press r"
 		return nil
 	}
-	m.pulling = true
-	m.pullName = name
-	m.pullStat = "starting pull " + name
-	m.pullFrac = 0
-	m.section = secModels
-	m.pullCh = make(chan PullEvent, 64)
-	go m.client.PullModel(name, m.pullCh)
-	return tea.Batch(m.prog.SetPercent(0), waitPull(m.pullCh))
+	return m.startMultiPull([]string{name}, workers, false, "pulling "+name+" across workers…")
 }
 
 func (m model) handlePull(ev PullEvent) (tea.Model, tea.Cmd) {
