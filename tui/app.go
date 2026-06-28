@@ -422,6 +422,7 @@ type consoleReadyMsg struct {
 	cmd   string // remote command to launch (empty = interactive login shell)
 	label string
 	agent string // non-empty: register this agent on clean exit
+	local bool   // run cmd on this machine instead of over SSH
 	err   error
 }
 type agentRegisteredMsg struct {

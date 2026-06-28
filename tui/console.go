@@ -194,6 +194,13 @@ func ollamaPullInto(base, model, worker string, ch chan<- PullEvent) error {
 	return sc.Err()
 }
 
+// localLoginCmd builds a child process that runs cmd in an interactive login
+// shell on this machine (so the user's full PATH and agent TUIs work), used for
+// deploying/launching agents on a locally-installed Olla without SSH.
+func localLoginCmd(cmd string) *exec.Cmd {
+	return exec.Command("bash", "-lc", cmd)
+}
+
 // ---- SSH console (Bubble Tea ExecProcess) ----------------------------------
 
 // sshConsoleCmd suspends the TUI and drops into an interactive SSH session using

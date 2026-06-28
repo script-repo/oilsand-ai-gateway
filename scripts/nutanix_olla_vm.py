@@ -461,6 +461,11 @@ def build_vm_body(
             "$objectType": "vmm.v4.ahv.config.GuestCustomizationParams",
             "config": {
                 "$objectType": "vmm.v4.ahv.config.CloudInit",
+                # datasourceType defaults to CONFIG_DRIVE_V2 in the SDK, but the
+                # vmm v4.0/v4.1 backend fails the CreateVm task with a generic
+                # "internal error" (VMM-10000) when it is omitted from the raw
+                # JSON body. Sending it explicitly is required for cloud-init.
+                "datasourceType": "CONFIG_DRIVE_V2",
                 "cloudInitScript": {
                     "$objectType": "vmm.v4.ahv.config.Userdata",
                     "value": userdata_b64,

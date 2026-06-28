@@ -137,6 +137,9 @@ then connects to `http://<host-primary-ip>:40114` automatically (the external IP
 default-route NIC, so the gateway is reachable from other machines). Linux only, and it needs passwordless
 `sudo` (or run the TUI as root) since the installer can't service an interactive password prompt.
 
+When the gateway is this local host, agents that run on the gateway (for example Crush) are
+installed and launched directly — no SSH password is required for them.
+
 ## VM (AHV) deployment — Patterns A and B
 
 The TUI's Nutanix section drives `scripts/nutanix_olla_vm.py`, which can also be run directly.

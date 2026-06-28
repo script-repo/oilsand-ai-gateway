@@ -172,6 +172,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notice = "key auth setup skipped (" + msg.err.Error() + ") — may prompt for password"
 		}
+		if msg.local {
+			if msg.agent != "" {
+				return m, localLaunchRegisterCmd(msg.cmd, orDefault(msg.label, "agent"), msg.agent, msg.host)
+			}
+			return m, localLaunchCmd(msg.cmd, orDefault(msg.label, "agent"))
+		}
 		if msg.cmd != "" {
 			if msg.agent != "" {
 				return m, sshLaunchRegisterCmd(msg.user, msg.host, msg.key, msg.cmd, orDefault(msg.label, "agent"), msg.agent)
@@ -1002,7 +1008,9 @@ func (m *model) deploySelectedAgent() tea.Cmd {
 		m.notice = a.name + " needs no deploy — press enter/o to launch it"
 		return nil
 	}
-	if m.sshPass == "" {
+	// Agents on the local Olla host (e.g. after "install Olla here") run
+	// directly, so no SSH password is needed for them.
+	if m.sshPass == "" && !isLocalHost(m.agentHost(a)) {
 		m.notice = "set an SSH password (reconnect) to deploy agents"
 		return nil
 	}
@@ -1022,18 +1030,35 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		}
 		return nil
 	}
+	local := isLocalHost(host)
 	if act == "deploy" {
-		m.notice = fmt.Sprintf("deploying %s on %s…", a.name, host)
+		where := host
+		if local {
+			where = "this host"
+		}
+		m.notice = fmt.Sprintf("deploying %s on %s…", a.name, where)
 		if a.name == "Hermes" && m.hermesGatewayWanted() {
-			m.notice = fmt.Sprintf("deploying %s + Telegram gateway on %s (unattended)…", a.name, host)
+			m.notice = fmt.Sprintf("deploying %s + Telegram gateway on %s (unattended)…", a.name, where)
 		}
 		script := m.agentDeployScript(a)
+		if local {
+			if a.name == "Crush" {
+				return localCrushCmd(m.crushConfigJSON(), script, a.name+" deploy", a.name)
+			}
+			return localDeployAgentCmd(script, a.name, a.name+" deploy")
+		}
 		if a.name == "Crush" {
 			return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), script, a.name+" deploy", a.name)
 		}
 		return deployAgentCmd(m.sshUser, host, m.sshPass, script, a.name, a.name+" deploy")
 	}
 	m.notice = fmt.Sprintf("opening %s on %s…", a.name, host)
+	if local {
+		if a.name == "Crush" {
+			return localCrushCmd(m.crushConfigJSON(), "", a.name, "")
+		}
+		return localLaunchCmd(loginShell(a.cli), a.name)
+	}
 	if a.name == "Crush" {
 		return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), "", a.name, "")
 	}
