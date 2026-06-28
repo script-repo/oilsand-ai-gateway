@@ -10,9 +10,25 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// version is the build version, injected at release time via
+// -ldflags "-X main.version=<tag>" (see .goreleaser.yaml). It defaults to "dev"
+// for local/go-run builds.
+var version = "dev"
+
+// tuiVersion returns a display string for the running build, e.g. "v0.2.1" for a
+// release or "dev" for an un-tagged local build.
+func tuiVersion() string {
+	v := strings.TrimSpace(version)
+	if v == "" || v == "dev" {
+		return "dev"
+	}
+	return "v" + strings.TrimPrefix(v, "v")
+}
 
 func main() {
 	// Avoid probing the terminal for its background color. termenv (via Glamour's

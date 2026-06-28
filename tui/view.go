@@ -43,10 +43,7 @@ func (m model) viewHeader() string {
 	}
 	right := strings.Join(badges, " ")
 
-	info := m.connInfo
-	if info == "" {
-		info = "press c to connect"
-	}
+	info := "TUI " + tuiVersion()
 	left := brand + brandSubStyle.Render("  "+truncate(info, maxInt(m.width-lipgloss.Width(brand)-lipgloss.Width(right)-6, 6)))
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
