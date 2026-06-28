@@ -125,7 +125,10 @@ Sections:
   1. **Update local machine** — downloads and runs the latest installer for this OS.
   2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
   3. **Update agents** — upgrades Crush (gateway) and re-launches OpenClaw and Hermes (workers).
-  4. **Update image** — changes the image used for new deployments (live PC image dropdown).
+  4. **Update image** — changes the image used for new deployments (live PC image dropdown), and
+     can **seed a new image into Prism Central from a URL** (e.g. a Rocky Linux cloud qcow2): fill
+     in the image URL (and optional name) and it is imported via the v4 Images API, then set as the
+     deployment image. Maps to `nutanix_olla_vm.py seed-image --name <n> --image-url <url>`.
   5. **Update OS** — pick gateways/workers in a multi-select, then runs `dnf -y update` on each.
   6. **Update all** — OS on every managed host, agents, Olla on gateways, and Ollama on workers.
   7. **Update Ollama cloud keys** — sets `OLLAMA_API_KEY` on one or all workers (applied via a

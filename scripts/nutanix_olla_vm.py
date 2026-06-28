@@ -208,6 +208,27 @@ class PrismClient:
     def find_subnet(self, name: str) -> dict:
         return self._list_find("/networking/v4.2/config/subnets", name, "subnet")
 
+    def list_images(self, name: str) -> list:
+        params = {"$filter": f"name eq '{name}'", "$limit": 5}
+        return self.request("GET", "/vmm/v4.2/content/images", params=params).get("data") or []
+
+    # -- image import --
+    def create_image_from_url(self, name: str, url: str, allow_insecure: bool = False) -> str:
+        body = {
+            "name": name,
+            "type": "DISK_IMAGE",
+            "source": {
+                "$objectType": "vmm.v4.content.UrlSource",
+                "url": url,
+                "shouldAllowInsecureUrl": allow_insecure,
+            },
+        }
+        resp = self.request("POST", "/vmm/v4.2/content/images", body=body)
+        task = (resp.get("data") or {}).get("extId")
+        if not task:
+            raise RuntimeError(f"createImage did not return a task extId: {json.dumps(resp)[:500]}")
+        return task
+
     # -- vm lifecycle --
     def create_vm(self, body: dict) -> str:
         resp = self.request("POST", "/vmm/v4.2/ahv/config/vms", body=body)
@@ -739,6 +760,27 @@ def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
     log("Pattern A complete: Olla is installed and serving.")
 
 
+# --- image seeding ----------------------------------------------------------
+def seed_image(pc: PrismClient, args: argparse.Namespace) -> None:
+    """Import a disk image into Prism Central from a URL. Idempotent: if an image
+    with the same name already exists, it is left untouched."""
+    name = args.name
+    url = args.image_url
+    try:
+        if pc.list_images(name):
+            log(f"image '{name}' already exists in Prism Central; nothing to import")
+            print(json.dumps({"seeded": False, "name": name, "reason": "exists"}, indent=2))
+            return
+    except Exception as exc:  # non-fatal: fall through to create
+        log(f"could not check for existing image '{name}': {exc}")
+    log(f"importing image '{name}' from {url}")
+    log("this downloads the image into Prism Central and may take several minutes")
+    task = pc.create_image_from_url(name, url, allow_insecure=args.allow_insecure)
+    pc.wait_task(task, timeout_s=args.timeout)
+    log(f"image '{name}' imported and ready")
+    print(json.dumps({"seeded": True, "name": name, "url": url}, indent=2))
+
+
 # --- custom deployment ------------------------------------------------------
 def _looks_like_url(s: str) -> bool:
     """True for a bare URL (a single token with a scheme); False for a shell
@@ -1023,6 +1065,15 @@ def main() -> int:
     pcst.add_argument("--name-prefix", default=None,
                       help="Auto-increment VM names from this prefix when --vm-name is omitted")
 
+    si = sub.add_parser("seed-image", help="Import a disk image into Prism Central from a URL")
+    add_common_args(si)
+    si.add_argument("--name", required=True, help="Name for the imported image")
+    si.add_argument("--image-url", required=True, help="URL of the qcow2/raw cloud image to import")
+    si.add_argument("--allow-insecure", action="store_true",
+                    help="Allow importing from an HTTP/self-signed-HTTPS URL")
+    si.add_argument("--timeout", type=int, default=1800,
+                    help="Seconds to wait for the import task (default: 1800)")
+
     # install-only variants: skip provisioning and run the SSH install against an
     # already-running VM (e.g. one created out-of-band via the Nutanix MCP).
     ia = sub.add_parser("install-a", help="Install Olla on an existing VM (no provisioning)")
@@ -1111,6 +1162,8 @@ def main() -> int:
         pattern_b(pc, args)
     elif args.command == "pattern-custom":
         pattern_custom(pc, args)
+    elif args.command == "seed-image":
+        seed_image(pc, args)
     elif args.command == "delete":
         vm = pc.find_vm_by_name(args.name)
         if not vm:

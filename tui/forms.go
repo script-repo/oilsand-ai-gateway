@@ -300,17 +300,61 @@ func (m *model) openHermesCfg() tea.Cmd {
 // from the live Prism Central image list (free-text fallback when PC is down).
 func (m *model) openUpdateImage() tea.Cmd {
 	m.fUpdImage = withDeployDefaults(m.deployCfg).ImageName
+	m.fSeedName, m.fSeedURL = "", ""
 	m.modal = modalUpdateImage
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewNote().Title("Deployment image").
-			Description("Applies to gateways/workers deployed from now on. Saved to tui.json."),
+			Description("Pick an existing image, or seed a new one below. Applies to future deploys; saved to tui.json."),
 		selectOrInput("image", "Image name", "disk image to clone", m.images, &m.fUpdImage),
+		huh.NewNote().Title("Seed a new image (optional)").
+			Description("Import a cloud image into Prism Central from a URL, then set it as the deployment image."),
+		huh.NewInput().Key("seedname").Title("New image name").
+			Description("blank = derive from the URL filename").
+			Placeholder("Rocky-9-GenericCloud").Value(&m.fSeedName),
+		huh.NewInput().Key("seedurl").Title("Image URL (qcow2)").
+			Placeholder("https://dl.rockylinux.org/.../Rocky-9-GenericCloud-Base.latest.x86_64.qcow2").Value(&m.fSeedURL),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	cmd := m.form.Init()
 	if m.pcCfg != nil && len(m.images) == 0 {
 		return tea.Batch(cmd, vmsCmd(m.pcCfg))
 	}
 	return cmd
+}
+
+// imageNameFromURL derives a sensible image name from a URL's filename.
+func imageNameFromURL(u string) string {
+	u = strings.TrimSpace(u)
+	if i := strings.IndexAny(u, "?#"); i >= 0 {
+		u = u[:i]
+	}
+	u = strings.TrimRight(u, "/")
+	if i := strings.LastIndex(u, "/"); i >= 0 {
+		u = u[i+1:]
+	}
+	return u
+}
+
+// startImageSeed imports a disk image into Prism Central from a URL, streaming
+// the helper's output into the Update section's Output pane (it can take a while
+// for large qcow2 images). The deployment image is set to the new name first.
+func (m *model) startImageSeed(name, url string) tea.Cmd {
+	if m.pcCfg == nil {
+		m.notice = "Prism Central not configured"
+		return nil
+	}
+	if m.procBusy {
+		m.notice = "a task is already running"
+		return nil
+	}
+	m.procBusy = true
+	m.section = secUpdate
+	m.zone = zoneContent
+	args := []string{"seed-image", "--name", name, "--image-url", url}
+	m.logLines = append(m.logLines, ">>> seed image "+name+": nutanix_olla_vm.py "+strings.Join(args, " "))
+	m.renderLog()
+	m.procCh = make(chan ProcEvent, 128)
+	go RunVMScript(m.pcCfg, args, m.procCh)
+	return waitProc(m.procCh)
 }
 
 // openOSUpdate lets the operator pick which managed hosts get OS package updates.
@@ -584,6 +628,24 @@ func (m *model) onFormComplete() tea.Cmd {
 		return nil
 
 	case modalUpdateImage:
+		// If a source URL was given, seed (import) that image into Prism Central
+		// and adopt it as the deployment image; otherwise just switch to a
+		// pre-existing image.
+		seedURL := m.fstr("seedurl")
+		if seedURL != "" {
+			seedName := m.fstr("seedname")
+			if seedName == "" {
+				seedName = imageNameFromURL(seedURL)
+			}
+			if seedName == "" {
+				m.notice = "enter a name for the new image"
+				return nil
+			}
+			m.deployCfg.ImageName = seedName
+			_ = saveDeployPC(m.tokFile, withDeployDefaults(m.deployCfg), m.pcOver)
+			m.notice = "importing image " + seedName + " into Prism Central — see Output"
+			return m.startImageSeed(seedName, seedURL)
+		}
 		img := m.fstr("image")
 		if img == "" {
 			m.notice = "pick an image"

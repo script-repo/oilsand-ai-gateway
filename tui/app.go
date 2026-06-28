@@ -241,6 +241,8 @@ type model struct {
 	fGwEnable  bool
 	// update section form values
 	fUpdImage   string
+	fSeedName   string
+	fSeedURL    string
 	fOSHosts    []string
 	fOllaKey    string
 	fOllaTarget string
