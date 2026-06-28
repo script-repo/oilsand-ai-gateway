@@ -108,6 +108,7 @@ func (m *model) deploySelectedCustom() tea.Cmd {
 	}
 	args := []string{"pattern-custom", "--script-url", it.url, "--name-prefix", slugifyName(it.name) + "-"}
 	args = append(args, m.deployFlags()...)
+	m.notice = "deploying " + it.name + " — provisioning VM, then running setup script (see Output)"
 	return m.startProc(args, "deploy "+it.name)
 }
 

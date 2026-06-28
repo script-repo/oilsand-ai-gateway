@@ -653,8 +653,11 @@ func (m *model) onFormComplete() tea.Cmd {
 		m.customDeploys = append(m.customDeploys, customDeploy{Name: name, ScriptURL: url})
 		_ = saveCustomDeploys(m.tokFile, m.customDeploys)
 		m.refreshCustomList()
+		// Highlight the just-added config (not the "add" row) so the next Enter
+		// deploys it instead of re-opening this form.
+		m.customList.Select(len(m.customList.Items()) - 1)
 		m.nutanixCustom = true
-		m.notice = "added custom deployment: " + name
+		m.notice = "added custom deployment: " + name + " — press enter to deploy it"
 		return nil
 	}
 	return nil

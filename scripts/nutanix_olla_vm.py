@@ -756,9 +756,20 @@ def finish_pattern_custom(ip: str, args: argparse.Namespace, vm_name: str,
     ssh = Ssh(ip, args.vm_user, args.vm_password)
     ssh.connect()
     ssh.wait_cloud_init()
-    log(f"running setup script from {url}")
-    cmd = f"curl -fsSL {shlex.quote(url)} | sudo bash"
-    rc, _out, _err = ssh.run(cmd)
+    log(f"downloading setup script from {url}")
+    remote = "/tmp/custom-setup.sh"
+    qurl = shlex.quote(url)
+    # Download and run as separate steps so a fetch failure is distinguishable
+    # from a script failure; pipefail isn't enough when piping straight to bash.
+    dl_rc, _o, _e = ssh.run(
+        f"curl -fsSL {qurl} -o {remote} || wget -qO {remote} {qurl}"
+    )
+    if dl_rc != 0:
+        ssh.close()
+        fatal(f"failed to download setup script from {url} (exit {dl_rc}); "
+              f"ensure the URL is reachable from the VM and curl/wget is installed")
+    log("running setup script on the guest")
+    rc, _out, _err = ssh.run(f"chmod +x {remote} && sudo bash {remote}")
     ssh.close()
 
     report = {

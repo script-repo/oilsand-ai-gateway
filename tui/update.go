@@ -1438,18 +1438,46 @@ func (m *model) refreshModels() {
 }
 
 func (m *model) refreshVMs() {
+	prefixes := m.customVMPrefixes()
 	items := make([]list.Item, 0, len(m.vms))
 	for _, v := range m.vms {
-		if v.Role != "gateway" && v.Role != "worker" {
-			continue
+		role := v.Role
+		if role != "gateway" && role != "worker" {
+			// Surface user-defined custom-deploy VMs as managed too; skip every
+			// other unrelated VM in Prism Central.
+			if matchesCustomPrefix(v.Name, prefixes) {
+				role = "custom"
+			} else {
+				continue
+			}
 		}
 		items = append(items, vmItem{
-			name: v.Name, role: v.Role, power: v.Power, ip: v.IP,
+			name: v.Name, role: role, power: v.Power, ip: v.IP,
 			vcpu: v.VCPU, mem: v.MemGiB, disk: v.DiskGiB,
 		})
 	}
 	m.vmsList.SetItems(items)
 	m.lockVMsPaging()
+}
+
+// customVMPrefixes returns the VM-name prefixes that identify custom-deploy VMs:
+// one per saved deployment type (slug + "-") plus the helper's generic fallback.
+func (m *model) customVMPrefixes() []string {
+	prefixes := []string{"custom-"}
+	for _, c := range m.customDeploys {
+		prefixes = append(prefixes, slugifyName(c.Name)+"-")
+	}
+	return prefixes
+}
+
+func matchesCustomPrefix(name string, prefixes []string) bool {
+	n := strings.ToLower(name)
+	for _, p := range prefixes {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // lockVMsPaging pins the Nutanix VM list to 4 items per page. SetSize/SetItems
