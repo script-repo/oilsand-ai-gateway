@@ -290,6 +290,9 @@ func (m *model) applyLayout(w, h int) {
 	m.vmsList.SetSize(m.contentW, vmsH)
 	m.lockVMsPaging()
 
+	// The Update list shares the layout with its Output pane, like Nutanix.
+	m.updateList.SetSize(m.contentW, vmsH)
+
 	m.composer.SetWidth(m.contentW)
 	chatH := maxInt(m.contentH-6, 3)
 	m.chatVP.Width = m.contentW
@@ -355,6 +358,8 @@ func (m *model) activeList() *list.Model {
 		return &m.vmsList
 	case secAgents:
 		return &m.agentsList
+	case secUpdate:
+		return &m.updateList
 	}
 	return nil
 }
@@ -595,6 +600,18 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		}
 		nl, cmd := m.vmsList.Update(msg)
 		m.vmsList = nl
+		return m, cmd
+
+	case secUpdate:
+		switch k {
+		case "esc", "left", "h":
+			m.leaveContent()
+			return m, nil
+		case "enter":
+			return m, m.runSelectedUpdate()
+		}
+		nl, cmd := m.updateList.Update(msg)
+		m.updateList = nl
 		return m, cmd
 	}
 	return m, nil

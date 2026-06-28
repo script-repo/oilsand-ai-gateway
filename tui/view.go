@@ -124,6 +124,8 @@ func (m model) sectionBody() string {
 		return m.viewNutanix()
 	case secAccess:
 		return m.viewAccess()
+	case secUpdate:
+		return m.viewUpdate()
 	}
 	return ""
 }
@@ -404,6 +406,21 @@ func (m model) viewNutanix() string {
 	)
 }
 
+// ---- section: update -------------------------------------------------------
+
+func (m model) viewUpdate() string {
+	busy := dimStyle.Render("enter run · esc back · " + m.updateSummary())
+	if m.procBusy {
+		busy = m.spin.View() + " " + warnStyle.Render("running update…")
+	}
+	return lipgloss.JoinVertical(lipgloss.Left,
+		labelStyle.Render("Maintenance & upgrades"),
+		m.updateList.View(),
+		labelStyle.Render("Output")+"  "+busy,
+		m.logVP.View(),
+	)
+}
+
 // ---- section: access -------------------------------------------------------
 
 func (m model) viewAccess() string {
@@ -438,6 +455,10 @@ func (m model) viewModal() string {
 		modalNutanixCfg: "Nutanix settings",
 		modalAgentHost:  "Choose worker",
 		modalHermesCfg:  "Hermes gateway / Telegram",
+		modalUpdateImage: "Update deployment image",
+		modalOSUpdate:    "Update OS on hosts",
+		modalOllaKey:     "Update Ollama cloud keys",
+		modalUpdateAll:   "Update everything",
 	}
 	inner := modalTitle.Render(titles[m.modal]) + "\n\n" + m.form.View()
 	box := modalBox.Render(inner)
@@ -478,6 +499,8 @@ func (m model) shortHelp() []key.Binding {
 		mid = []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.Console, m.km.NextName, m.km.Back}
 	case secAccess:
 		mid = []key.Binding{m.km.Token, m.km.ClearToken, m.km.Back}
+	case secUpdate:
+		mid = []key.Binding{m.km.Open, m.km.Back}
 	default:
 		mid = []key.Binding{m.km.Back}
 	}

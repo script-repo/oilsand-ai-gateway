@@ -32,6 +32,7 @@ const (
 	secLoad
 	secNutanix
 	secAccess
+	secUpdate
 )
 
 type sectionInfo struct {
@@ -48,6 +49,7 @@ var sections = []sectionInfo{
 	{"Load", "load balancing"},
 	{"Nutanix", "VMs & deploy"},
 	{"Access", "base URL & token"},
+	{"Update", "maintenance & upgrades"},
 }
 
 // focus zone: are we navigating the sidebar, or interacting with the content?
@@ -70,6 +72,10 @@ const (
 	modalNutanixCfg
 	modalAgentHost
 	modalHermesCfg
+	modalUpdateImage
+	modalOSUpdate
+	modalOllaKey
+	modalUpdateAll
 )
 
 type chatRole int
@@ -141,6 +147,7 @@ type model struct {
 	poolList   list.Model
 	vmsList    list.Model
 	agentsList list.Model
+	updateList list.Model
 
 	// agent registrations (agent name -> host it was deployed on)
 	agentReg     map[string]string
@@ -226,6 +233,12 @@ type model struct {
 	fTgHome    string
 	fGwMode    string
 	fGwEnable  bool
+	// update section form values
+	fUpdImage   string
+	fOSHosts    []string
+	fOllaKey    string
+	fOllaTarget string
+	fUpdConfirm bool
 
 	// hermes gateway / telegram config (persisted)
 	hermesCfg hermesSettings
@@ -315,6 +328,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		poolList:   mkList("Pool"),
 		vmsList:    mkList("VMs"),
 		agentsList: mkList("Agents"),
+		updateList: mkList("Update"),
 		chatVP:     viewport.New(80, 16),
 		logVP:      viewport.New(80, 8),
 		composer:   ta,
@@ -334,6 +348,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		m.chatModel = m.defModel
 	}
 	m.refreshAgents()
+	m.refreshUpdateList()
 	return m
 }
 

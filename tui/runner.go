@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -310,6 +311,81 @@ func RunVMScripts(cfg *PCConfig, jobs []vmJob, ch chan<- ProcEvent) {
 		}(j)
 	}
 	wg.Wait()
+	ch <- ProcEvent{Done: true, Code: worst}
+}
+
+// ---- update plans (Update section) -----------------------------------------
+
+// updateStep is one maintenance action: a shell script run either on this
+// machine (local) or on a remote host over SSH. sudo runs the whole script as
+// root (non-interactively, so passwordless sudo is required on the target).
+type updateStep struct {
+	title string
+	host  string
+	user  string
+	pass  string
+	script string
+	local bool
+	sudo  bool
+}
+
+// localStepCmd runs a script on this machine. Non-sudo runs in a login shell so
+// the user's PATH (ollama, npm bins) is available; sudo runs it as root.
+func localStepCmd(script string, sudo bool) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("powershell", "-NoProfile", "-Command", script)
+	}
+	if sudo && os.Geteuid() != 0 {
+		return exec.Command("sudo", "-n", "bash", "-lc", script)
+	}
+	return exec.Command("bash", "-lc", script)
+}
+
+// sshStepCmd runs a script on a remote host over SSH. The script is base64-piped
+// to the remote shell so no quoting is needed. BatchMode avoids password prompts
+// (we rely on the managed key); sudo escalates the whole script to root.
+func sshStepCmd(user, host, keyPath, script string, sudo bool) *exec.Cmd {
+	b64 := base64.StdEncoding.EncodeToString([]byte(script))
+	sh := "bash -l -s"
+	if sudo {
+		sh = "sudo -n bash -s"
+	}
+	remote := "echo " + b64 + " | base64 -d | " + sh
+	args := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=" + osNull(),
+		"-o", "BatchMode=yes",
+	}
+	if keyPath != "" {
+		args = append(args, "-i", keyPath, "-o", "IdentitiesOnly=yes")
+	}
+	args = append(args, fmt.Sprintf("%s@%s", orDefault(user, "rocky"), host), remote)
+	return exec.Command("ssh", args...)
+}
+
+// RunUpdatePlan executes each step in order, streaming output into ch with a
+// per-step header. It installs the managed SSH key on remote hosts first (so
+// BatchMode SSH can authenticate), and emits a single aggregate Done at the end.
+func RunUpdatePlan(steps []updateStep, ch chan<- ProcEvent) {
+	defer close(ch)
+	worst := 0
+	for _, s := range steps {
+		ch <- ProcEvent{Line: "=== " + s.title + " ==="}
+		var code int
+		if s.local || isLocalHost(s.host) {
+			code = streamProcLines(localStepCmd(s.script, s.sudo), "", ch)
+		} else {
+			key, err := EnsureKeyAuth(s.host, s.user, s.pass)
+			if err != nil {
+				ch <- ProcEvent{Line: "  key auth: " + err.Error()}
+			}
+			code = streamProcLines(sshStepCmd(s.user, s.host, key, s.script, s.sudo), "", ch)
+		}
+		if code != 0 {
+			worst = code
+			ch <- ProcEvent{Line: fmt.Sprintf("  step failed (rc=%d)", code)}
+		}
+	}
 	ch <- ProcEvent{Done: true, Code: worst}
 }
 

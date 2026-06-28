@@ -119,6 +119,19 @@ Sections:
   API version (it tries `v4.2`, then `v4.1`, then `v4.0`) so it works across PC releases.
 * **Access** — create/rotate a client API token (`t`/`X`); shows the OpenAI Base URL, token, model
   and a `curl` example.
+* **Update** — maintenance & upgrades. A list of seven actions (`enter` to run, `esc` to go back),
+  each streaming its output into the Output pane below:
+  1. **Update local machine** — downloads and runs the latest installer for this OS.
+  2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
+  3. **Update agents** — upgrades Crush (gateway) and re-launches OpenClaw and Hermes (workers).
+  4. **Update image** — changes the image used for new deployments (live PC image dropdown).
+  5. **Update OS** — pick gateways/workers in a multi-select, then runs `dnf -y update` on each.
+  6. **Update all** — OS on every managed host, agents, Olla on gateways, and Ollama on workers.
+  7. **Update Ollama cloud keys** — sets `OLLAMA_API_KEY` on one or all workers (applied via a
+     systemd drop-in and a service restart; the key is not saved to `tui.json`).
+
+  Remote steps run non-interactively over SSH using the managed key, so the target hosts need
+  passwordless `sudo` (which the deploy cloud-init configures).
 
 ### First launch
 

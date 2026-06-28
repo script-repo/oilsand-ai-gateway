@@ -296,6 +296,80 @@ func (m *model) openHermesCfg() tea.Cmd {
 	return m.form.Init()
 }
 
+// openUpdateImage lets the operator change the image used for new deployments,
+// from the live Prism Central image list (free-text fallback when PC is down).
+func (m *model) openUpdateImage() tea.Cmd {
+	m.fUpdImage = withDeployDefaults(m.deployCfg).ImageName
+	m.modal = modalUpdateImage
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Deployment image").
+			Description("Applies to gateways/workers deployed from now on. Saved to tui.json."),
+		selectOrInput("image", "Image name", "disk image to clone", m.images, &m.fUpdImage),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	cmd := m.form.Init()
+	if m.pcCfg != nil && len(m.images) == 0 {
+		return tea.Batch(cmd, vmsCmd(m.pcCfg))
+	}
+	return cmd
+}
+
+// openOSUpdate lets the operator pick which managed hosts get OS package updates.
+func (m *model) openOSUpdate() tea.Cmd {
+	hosts := m.updateHosts()
+	if len(hosts) == 0 {
+		m.notice = "no managed hosts known — connect and refresh the pool first"
+		return nil
+	}
+	opts := make([]huh.Option[string], 0, len(hosts))
+	for _, h := range hosts {
+		opts = append(opts, huh.NewOption(h.role+"  "+h.host, h.host))
+	}
+	m.fOSHosts = nil
+	m.modal = modalOSUpdate
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewMultiSelect[string]().Key("oshosts").
+			Title("Update OS on which hosts?").
+			Description("space to toggle · enter to run").
+			Options(opts...).Value(&m.fOSHosts),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openOllaKey collects an OLLAMA_API_KEY and the worker(s) to apply it to.
+func (m *model) openOllaKey() tea.Cmd {
+	workers := workersFromEndpoints(m.endpoints)
+	if len(workers) == 0 {
+		m.notice = "no workers known — open Pool and press r first"
+		return nil
+	}
+	m.fOllaKey = ""
+	m.fOllaTarget = "all"
+	opts := []huh.Option[string]{huh.NewOption("all workers", "all")}
+	for _, w := range workers {
+		opts = append(opts, huh.NewOption(w.name+"  ("+w.host+")", w.host))
+	}
+	m.modal = modalOllaKey
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewInput().Key("ollakey").Title("OLLAMA_API_KEY").Password(true).
+			Description("written to a systemd drop-in; applied, not saved to tui.json").Value(&m.fOllaKey),
+		huh.NewSelect[string]().Key("ollatarget").Title("Apply to").Options(opts...).Value(&m.fOllaTarget),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openUpdateAllConfirm asks for confirmation before the combined update plan.
+func (m *model) openUpdateAllConfirm() tea.Cmd {
+	m.fUpdConfirm = false
+	m.modal = modalUpdateAll
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Key("updall").
+			Title("Update everything?").
+			Description("OS updates on all managed hosts, agents, Olla on gateways, and Ollama on workers.").
+			Affirmative("Yes").Negative("No").Value(&m.fUpdConfirm),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
 // openAgentHostPick lets the user choose which worker an agent is opened/deployed
 // on (item: "specify the worker that hermes or openclaw is deployed on").
 func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
@@ -493,6 +567,66 @@ func (m *model) onFormComplete() tea.Cmd {
 		m.refreshAgents()
 		m.notice = "Hermes gateway settings saved"
 		return nil
+
+	case modalUpdateImage:
+		img := m.fstr("image")
+		if img == "" {
+			m.notice = "pick an image"
+			return nil
+		}
+		m.deployCfg.ImageName = img
+		_ = saveDeployPC(m.tokFile, withDeployDefaults(m.deployCfg), m.pcOver)
+		m.notice = "deployment image set to " + img
+		return nil
+
+	case modalOSUpdate:
+		var hosts []string
+		if m.form != nil {
+			if v, ok := m.form.Get("oshosts").([]string); ok {
+				hosts = v
+			}
+		}
+		if len(hosts) == 0 {
+			m.notice = "no hosts selected"
+			return nil
+		}
+		roleByHost := map[string]string{}
+		for _, h := range m.updateHosts() {
+			roleByHost[h.host] = h.role
+		}
+		user := orDefault(m.sshUser, "rocky")
+		var steps []updateStep
+		for _, h := range hosts {
+			steps = append(steps, osUpdateStep(orDefault(roleByHost[h], "host"), h, user, m.sshPass))
+		}
+		return m.startUpdatePlan(steps, "OS update")
+
+	case modalOllaKey:
+		key := m.fsecret("ollakey")
+		if strings.TrimSpace(key) == "" {
+			m.notice = "enter an OLLAMA_API_KEY"
+			return nil
+		}
+		target := orDefault(m.fstr("ollatarget"), "all")
+		user := orDefault(m.sshUser, "rocky")
+		var steps []updateStep
+		for _, w := range workersFromEndpoints(m.endpoints) {
+			if target == "all" || target == w.host {
+				steps = append(steps, ollamaKeyStep(w.host, user, m.sshPass, key))
+			}
+		}
+		return m.startUpdatePlan(steps, "update Ollama cloud keys")
+
+	case modalUpdateAll:
+		confirm := m.fUpdConfirm
+		if m.form != nil {
+			confirm = m.form.GetBool("updall")
+		}
+		if !confirm {
+			m.notice = "update all cancelled"
+			return nil
+		}
+		return m.startUpdatePlan(m.updateAllPlan(), "update all")
 	}
 	return nil
 }
