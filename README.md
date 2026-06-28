@@ -133,7 +133,8 @@ If you are running the TUI on the Linux box that should host the gateway (for ex
 SSH), press `o` in the **Nutanix** section to install Olla on that machine instead of
 provisioning a VM. This runs `scripts/remote/install-olla.sh` (via `sudo`) to install the Olla
 binary, write `/etc/olla/olla.yaml`, and start the `olla` systemd service on `:40114`; the TUI
-then connects to `http://127.0.0.1:40114` automatically. Linux only, and it needs passwordless
+then connects to `http://<host-primary-ip>:40114` automatically (the external IP of the host's
+default-route NIC, so the gateway is reachable from other machines). Linux only, and it needs passwordless
 `sudo` (or run the TUI as root) since the installer can't service an interactive password prompt.
 
 ## VM (AHV) deployment — Patterns A and B

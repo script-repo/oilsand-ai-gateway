@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +91,39 @@ func vmScriptPath() string {
 // LocalOllaPort is the port the locally-installed Olla gateway listens on (must
 // match scripts/remote/install-olla.sh's OLLA_PORT default).
 const LocalOllaPort = "40114"
+
+// primaryIP returns the host's primary (default-route) IPv4 address — the
+// external IP of the NIC used to reach the network — falling back to 127.0.0.1.
+// It opens no traffic; the UDP "dial" just makes the kernel pick a source IP.
+func primaryIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP != nil {
+			if ip := addr.IP.To4(); ip != nil && !ip.IsLoopback() {
+				return ip.String()
+			}
+		}
+	}
+	// Fallback: first non-loopback IPv4 from the interface list.
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ip := ipnet.IP.To4(); ip != nil {
+					return ip.String()
+				}
+			}
+		}
+	}
+	return "127.0.0.1"
+}
+
+// LocalOllaURL is the gateway URL to connect to after a local Olla install. It
+// prefers the host's external IP so the gateway is reachable from other hosts,
+// not just loopback.
+func LocalOllaURL() string {
+	return "http://" + primaryIP() + ":" + LocalOllaPort
+}
 
 // ProcEvent is a line of subprocess output or a terminal exit signal.
 type ProcEvent struct {

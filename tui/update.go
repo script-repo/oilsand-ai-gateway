@@ -1141,7 +1141,7 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 		if ev.Code == 0 {
 			m.logLines = append(m.logLines, "<<< done")
 			if wasLocalOlla {
-				gw := normalizeGateway("http://127.0.0.1:" + LocalOllaPort)
+				gw := normalizeGateway(LocalOllaURL())
 				m.gateway = gw
 				_ = saveConnect(m.tokFile, gw, m.sshUser, m.sshPass)
 				m.notice = "Olla installed locally — connecting to " + gw

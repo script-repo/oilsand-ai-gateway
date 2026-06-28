@@ -400,18 +400,16 @@ def build_vm_body(
     memory_gib: int,
     disk_gib: int,
     cloud_init_userdata: str,
-    image_storage_cluster_ext_id: str | None = None,
 ) -> dict:
     userdata_b64 = base64.b64encode(cloud_init_userdata.encode()).decode()
+    # NB: do NOT add a "storageCluster" to the image reference. It is optional and
+    # the vmm v4.0/v4.1 ImageReference schema rejects it outright ("properties
+    # which are not allowed by the schema: [storageCluster]"), failing VM create
+    # with HTTP 400. AHV picks a storage container from the target cluster.
     image_ref: dict[str, Any] = {
         "$objectType": "vmm.v4.ahv.config.ImageReference",
         "imageExtId": image_ext_id,
     }
-    if image_storage_cluster_ext_id:
-        image_ref["storageCluster"] = {
-            "$objectType": "vmm.v4.ahv.config.ClusterReference",
-            "extId": image_storage_cluster_ext_id,
-        }
     return {
         "$objectType": "vmm.v4.ahv.config.Vm",
         "name": name,
@@ -627,8 +625,6 @@ def provision_vm(pc: PrismClient, args: argparse.Namespace, vm_name: str) -> dic
     image_ext_id = image["extId"]
     cluster_ext_id = cluster["extId"]
     subnet_ext_id = subnet["extId"]
-    image_clusters = image.get("clusterLocationExtIds") or []
-    storage_cluster = cluster_ext_id if cluster_ext_id in image_clusters else (image_clusters[0] if image_clusters else None)
 
     log(f"image '{args.image_name}' -> {image_ext_id}")
     log(f"cluster '{args.cluster_name}' -> {cluster_ext_id}")
@@ -645,7 +641,6 @@ def provision_vm(pc: PrismClient, args: argparse.Namespace, vm_name: str) -> dic
         memory_gib=args.memory_gib,
         disk_gib=args.disk_gib,
         cloud_init_userdata=cloud_init,
-        image_storage_cluster_ext_id=storage_cluster,
     )
 
     if args.dry_run:
