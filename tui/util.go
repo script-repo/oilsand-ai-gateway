@@ -17,6 +17,15 @@ func osNull() string {
 	return "/dev/null"
 }
 
+// osc8 wraps text in an OSC 8 terminal hyperlink so supporting terminals render
+// it as a clickable link (click / ctrl+click opens the URL in a browser).
+func osc8(url, text string) string {
+	if url == "" {
+		return text
+	}
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a

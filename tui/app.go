@@ -155,6 +155,12 @@ type model struct {
 	customDeploys []customDeploy
 	nutanixCustom bool // Nutanix section is showing the custom-deploy submenu
 
+	// custom-deploy access link: pendingCustom is the config of an in-flight
+	// custom deploy; once its VM IP is reported we record lastCustomAccess.
+	pendingCustom    *customDeploy
+	lastCustomAccess string
+	lastCustomName   string
+
 	// image attribution: vmImages is the deploy-time VM name -> image map we
 	// record; imageByID resolves a VM's source-image extId to a name from PC.
 	vmImages  map[string]string
@@ -254,8 +260,11 @@ type model struct {
 	fOllaTarget string
 	fUpdConfirm bool
 	// custom deployment form values
-	fCustName string
-	fCustURL  string
+	fCustName   string
+	fCustURL    string
+	fCustScheme string
+	fCustPort   string
+	fCustPath   string
 
 	// hermes gateway / telegram config (persisted)
 	hermesCfg hermesSettings

@@ -380,16 +380,24 @@ func (m model) viewLoad() string {
 // ---- section: nutanix ------------------------------------------------------
 
 func (m model) viewCustomDeploys() string {
-	busy := dimStyle.Render("enter deploy/add · x delete · esc back")
+	busy := dimStyle.Render("enter deploy/add · x delete · b open link · esc back")
 	if m.procBusy {
 		busy = m.spin.View() + " " + warnStyle.Render("running deploy…")
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		labelStyle.Render("Custom deployments")+dimStyle.Render("  (provision the configured image, then run a setup script)"),
+	rows := []string{
+		labelStyle.Render("Custom deployments") + dimStyle.Render("  (provision the configured image, then run a setup script)"),
 		m.customList.View(),
+	}
+	if m.lastCustomAccess != "" {
+		link := goodStyle.Render(osc8(m.lastCustomAccess, m.lastCustomAccess))
+		rows = append(rows, labelStyle.Render("Workload")+"  "+
+			dimStyle.Render(m.lastCustomName+" → ")+link+dimStyle.Render("  (click or press b)"))
+	}
+	rows = append(rows,
 		labelStyle.Render("Output")+"  "+busy,
 		m.logVP.View(),
 	)
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 func (m model) viewNutanix() string {

@@ -450,6 +450,7 @@ func (m *model) openUpdateAllConfirm() tea.Cmd {
 // the URL of a setup script run on the VM (curl | sudo bash) after it boots.
 func (m *model) openCustomDeploy() tea.Cmd {
 	m.fCustName, m.fCustURL = "", ""
+	m.fCustScheme, m.fCustPort, m.fCustPath = "http", "", ""
 	m.modal = modalCustomDeploy
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("custname").Title("Deployment name").
@@ -457,6 +458,14 @@ func (m *model) openCustomDeploy() tea.Cmd {
 		huh.NewInput().Key("custurl").Title("Setup script").
 			Description("a URL (downloaded + sudo bash'd) OR a full shell command run on the VM").
 			Placeholder("https://example.com/setup.sh  or  curl -fsSL <url> | sudo bash").Value(&m.fCustURL),
+		huh.NewNote().Title("Workload access link (optional)").
+			Description("shown as a clickable link after deploy: <scheme>://<vm-ip>:<port><path>"),
+		huh.NewSelect[string]().Key("custscheme").Title("Scheme").
+			Options(huh.NewOptions("http", "https")...).Value(&m.fCustScheme),
+		huh.NewInput().Key("custport").Title("Workload port").
+			Placeholder("e.g. 8080").Value(&m.fCustPort),
+		huh.NewInput().Key("custpath").Title("Path").
+			Description("optional, e.g. /dashboard").Value(&m.fCustPath),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -747,7 +756,10 @@ func (m *model) onFormComplete() tea.Cmd {
 			m.notice = "deployment name and setup script (URL or command) are required"
 			return nil
 		}
-		m.customDeploys = append(m.customDeploys, customDeploy{Name: name, ScriptURL: url})
+		m.customDeploys = append(m.customDeploys, customDeploy{
+			Name: name, ScriptURL: url,
+			Scheme: m.fstr("custscheme"), Port: m.fstr("custport"), Path: m.fstr("custpath"),
+		})
 		_ = saveCustomDeploys(m.tokFile, m.customDeploys)
 		m.refreshCustomList()
 		// Highlight the just-added config (not the "add" row) so the next Enter

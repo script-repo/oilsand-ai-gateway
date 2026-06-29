@@ -10,19 +10,30 @@ import (
 // customItem is a row in the Nutanix "custom deployments" submenu: either the
 // special "add deployment" action (add=true) or one saved deployment type.
 type customItem struct {
-	name string
-	url  string
-	add  bool
+	name   string
+	url    string
+	scheme string
+	port   string
+	path   string
+	add    bool
+}
+
+func (i customItem) cfg() customDeploy {
+	return customDeploy{Name: i.name, ScriptURL: i.url, Scheme: i.scheme, Port: i.port, Path: i.path}
 }
 
 func (i customItem) Title() string {
 	if i.add {
 		return "+ add deployment"
 	}
-	if i.url == "" {
-		return i.name
+	title := i.name
+	if i.port != "" {
+		title += "  :" + i.port
 	}
-	return i.name + "  →  " + i.url
+	if i.url != "" {
+		title += "  →  " + i.url
+	}
+	return title
 }
 
 func (i customItem) Description() string {
@@ -33,6 +44,22 @@ func (i customItem) Description() string {
 }
 
 func (i customItem) FilterValue() string { return i.Title() }
+
+// accessURL builds the workload link for a deployed VM IP, or "" if no port.
+func (c customDeploy) accessURL(ip string) string {
+	if c.Port == "" || ip == "" {
+		return ""
+	}
+	scheme := c.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	path := c.Path
+	if path != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return scheme + "://" + ip + ":" + c.Port + path
+}
 
 // defaultCustomDeploys are the built-in deployment types seeded on first run.
 func defaultCustomDeploys() []customDeploy {
@@ -47,7 +74,10 @@ func defaultCustomDeploys() []customDeploy {
 func (m *model) refreshCustomList() {
 	items := []list.Item{customItem{add: true}}
 	for _, c := range m.customDeploys {
-		items = append(items, customItem{name: c.Name, url: c.ScriptURL})
+		items = append(items, customItem{
+			name: c.Name, url: c.ScriptURL,
+			scheme: c.Scheme, port: c.Port, path: c.Path,
+		})
 	}
 	m.customList.SetItems(items)
 }
@@ -116,6 +146,10 @@ func (m *model) deploySelectedCustom() tea.Cmd {
 	}
 	args := []string{"pattern-custom", "--script-url", it.url, "--name-prefix", slugifyName(it.name) + "-"}
 	args = append(args, m.deployFlags()...)
+	// Remember the workload's access config so we can show a clickable link once
+	// the VM's IP is reported.
+	cfg := it.cfg()
+	m.pendingCustom = &cfg
 	m.notice = "deploying " + it.name + " — provisioning VM, then running setup script (see Output)"
 	return m.startProc(args, "deploy "+it.name)
 }

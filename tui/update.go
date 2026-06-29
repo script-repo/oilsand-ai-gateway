@@ -590,6 +590,17 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			case "x", "delete":
 				m.deleteSelectedCustom()
 				return m, nil
+			case "b":
+				if m.lastCustomAccess != "" {
+					if err := openBrowser(m.lastCustomAccess); err != nil {
+						m.notice = "could not open browser: " + err.Error()
+					} else {
+						m.notice = "opening " + m.lastCustomAccess
+					}
+				} else {
+					m.notice = "no workload link yet — deploy a custom type with a port first"
+				}
+				return m, nil
 			}
 			nl, cmd := m.customList.Update(msg)
 			m.customList = nl
@@ -1336,22 +1347,24 @@ func parseBatchEndpoint(line string) (batchEndpoint, bool) {
 	return ep, true
 }
 
-// parseVMRecord extracts a deploy-time "OILSAND_VM {name,image}" line emitted by
-// provision_vm, so the TUI can attribute the source image to each VM it deploys.
-func parseVMRecord(line string) (name, image string, ok bool) {
+// parseVMRecord extracts a deploy-time "OILSAND_VM {name,image,ip}" line emitted
+// by provision_vm, so the TUI can attribute the source image (and IP) to each VM
+// it deploys.
+func parseVMRecord(line string) (name, image, ip string, ok bool) {
 	const marker = "OILSAND_VM "
 	i := strings.Index(line, marker)
 	if i < 0 {
-		return "", "", false
+		return "", "", "", false
 	}
 	var rec struct {
 		Name  string `json:"name"`
 		Image string `json:"image"`
+		IP    string `json:"ip"`
 	}
 	if err := json.Unmarshal([]byte(line[i+len(marker):]), &rec); err != nil || rec.Name == "" {
-		return "", "", false
+		return "", "", "", false
 	}
-	return rec.Name, rec.Image, true
+	return rec.Name, rec.Image, rec.IP, true
 }
 
 func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
@@ -1366,12 +1379,21 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 				m.batch.endpoints = append(m.batch.endpoints, ep)
 			}
 		}
-		if name, image, ok := parseVMRecord(ev.Line); ok {
+		if name, image, ip, ok := parseVMRecord(ev.Line); ok {
 			if m.vmImages == nil {
 				m.vmImages = map[string]string{}
 			}
 			m.vmImages[name] = image
 			_ = saveVMImages(m.tokFile, m.vmImages)
+			// For a custom deploy with a workload port, surface a clickable link.
+			if m.pendingCustom != nil {
+				if url := m.pendingCustom.accessURL(ip); url != "" {
+					m.lastCustomAccess = url
+					m.lastCustomName = name
+					m.logLines = append(m.logLines, "ACCESS  "+name+"  →  "+osc8(url, url)+"  (click, or press b)")
+					m.renderLog()
+				}
+			}
 		}
 	}
 	if ev.Done {
@@ -1379,6 +1401,7 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			return m.handleBatchDone(ev)
 		}
 		m.procBusy = false
+		m.pendingCustom = nil
 		wasLocalOlla := m.localOllaPending
 		m.localOllaPending = false
 		if ev.Code == 0 {

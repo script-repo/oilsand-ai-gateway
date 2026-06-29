@@ -167,6 +167,22 @@ func streamProc(cmd *exec.Cmd, ch chan<- ProcEvent) {
 // (the installer is a bash/systemd script, so Linux only).
 func localOllaSupported() bool { return runtime.GOOS == "linux" }
 
+// openBrowser opens url in the OS default browser. When the TUI runs over SSH
+// this targets the remote host's browser; the OSC 8 hyperlink (handled by the
+// local terminal) is the better path in that case.
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
+}
+
 // localOllaScriptPath locates scripts/remote/install-olla.sh relative to this
 // binary (the installer copies the scripts/ tree next to the binary) or the repo.
 func localOllaScriptPath() string {
@@ -320,13 +336,13 @@ func RunVMScripts(cfg *PCConfig, jobs []vmJob, ch chan<- ProcEvent) {
 // machine (local) or on a remote host over SSH. sudo runs the whole script as
 // root (non-interactively, so passwordless sudo is required on the target).
 type updateStep struct {
-	title string
-	host  string
-	user  string
-	pass  string
+	title  string
+	host   string
+	user   string
+	pass   string
 	script string
-	local bool
-	sudo  bool
+	local  bool
+	sudo   bool
 }
 
 // localStepCmd runs a script on this machine. Non-sudo runs in a login shell so

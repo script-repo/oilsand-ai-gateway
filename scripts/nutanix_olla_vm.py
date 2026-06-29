@@ -688,14 +688,13 @@ def provision_vm(pc: PrismClient, args: argparse.Namespace, vm_name: str) -> dic
     vm_ext_id = pc.vm_ext_id_from_task(task, vm_name)
     log(f"VM created: {vm_ext_id}")
 
-    # Emit a machine-readable record so the TUI can attribute the source image to
-    # this VM (the v4 VM API doesn't reliably retain it after clone).
-    print("OILSAND_VM " + json.dumps({"name": vm_name, "image": args.image_name}))
-
     pc.power_on(vm_ext_id)
     prefix = args.ip_prefix or None
     ip = pc.wait_for_ip(vm_ext_id, prefer_prefix=prefix)
     log(f"VM IP: {ip}")
+    # Emit a machine-readable record so the TUI can attribute the source image and
+    # IP to this VM (the v4 VM API doesn't reliably retain the image after clone).
+    print("OILSAND_VM " + json.dumps({"name": vm_name, "image": args.image_name, "ip": ip}))
     return {"vm_ext_id": vm_ext_id, "ip": ip, "name": vm_name}
 
 

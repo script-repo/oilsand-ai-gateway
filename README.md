@@ -173,6 +173,10 @@ Beyond the built-in gateway/worker patterns, you can define your own deployment 
   `sudo bash`) or a full **shell command** (e.g. `curl -fsSL <url> | sudo bash`) run verbatim on
   the guest. Saved configs persist in `~/.oilsand-ai-gateway/tui.json`. Two examples (`NP4M`,
   `NRCC`) are pre-populated on first run.
+* You can also give a config an optional **workload access link** (scheme + port + path). After a
+  successful deploy the TUI shows `<scheme>://<vm-ip>:<port><path>` as a **clickable link** (OSC 8
+  hyperlink — click or ctrl/cmd-click in a supporting terminal) and you can press **b** to open it
+  in a browser.
 * Highlight a saved config and press **enter** to deploy: the TUI provisions a VM from the
   Nutanix settings image/cluster/subnet, waits for cloud-init, then runs your setup script/command.
   VM names auto-increment from the deployment name (e.g. `postgres-node-01`, `postgres-node-02`).

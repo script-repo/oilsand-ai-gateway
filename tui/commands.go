@@ -373,6 +373,11 @@ type tuiSettings struct {
 type customDeploy struct {
 	Name      string `json:"name"`
 	ScriptURL string `json:"script_url"`
+	// Optional access link for the deployed workload, shown (clickable) after a
+	// successful deploy as <scheme>://<vm-ip>:<port><path>.
+	Scheme string `json:"scheme,omitempty"`
+	Port   string `json:"port,omitempty"`
+	Path   string `json:"path,omitempty"`
 }
 
 // hermesSettings holds the one-time inputs that let Hermes deploys set up the
