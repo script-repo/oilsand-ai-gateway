@@ -298,21 +298,42 @@ func (m *model) openHermesCfg() tea.Cmd {
 
 // openUpdateImage lets the operator change the image used for new deployments,
 // from the live Prism Central image list (free-text fallback when PC is down).
+// imagePreset is a ready-to-seed cloud image: a friendly label, the name it gets
+// in Prism Central, and the source URL.
+type imagePreset struct {
+	label string
+	name  string
+	url   string
+}
+
+var imagePresets = []imagePreset{
+	{"Rocky Linux 9 (GenericCloud)", "Rocky-9-GenericCloud", "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"},
+	{"Rocky Linux 10 (GenericCloud)", "Rocky-10-GenericCloud", "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2"},
+	{"Ubuntu 24.04 (Noble cloud)", "Ubuntu-24.04-Noble", "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"},
+}
+
 func (m *model) openUpdateImage() tea.Cmd {
 	m.fUpdImage = withDeployDefaults(m.deployCfg).ImageName
-	m.fSeedName, m.fSeedURL = "", ""
+	m.fSeedName, m.fSeedURL, m.fSeedPreset = "", "", ""
 	m.modal = modalUpdateImage
+	presetOpts := []huh.Option[string]{huh.NewOption("— none / custom URL below —", "")}
+	for _, p := range imagePresets {
+		presetOpts = append(presetOpts, huh.NewOption(p.label, p.url))
+	}
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewNote().Title("Deployment image").
 			Description("Pick an existing image, or seed a new one below. Applies to future deploys; saved to tui.json."),
 		selectOrInput("image", "Image name", "disk image to clone", m.images, &m.fUpdImage),
 		huh.NewNote().Title("Seed a new image (optional)").
-			Description("Import a cloud image into Prism Central from a URL, then set it as the deployment image."),
+			Description("Import a cloud image into Prism Central, then set it as the deployment image."),
+		huh.NewSelect[string]().Key("preset").Title("Preset image").
+			Options(presetOpts...).Value(&m.fSeedPreset),
 		huh.NewInput().Key("seedname").Title("New image name").
-			Description("blank = derive from the URL filename").
+			Description("blank = preset default or URL filename").
 			Placeholder("Rocky-9-GenericCloud").Value(&m.fSeedName),
-		huh.NewInput().Key("seedurl").Title("Image URL (qcow2)").
-			Placeholder("https://dl.rockylinux.org/.../Rocky-9-GenericCloud-Base.latest.x86_64.qcow2").Value(&m.fSeedURL),
+		huh.NewInput().Key("seedurl").Title("…or custom image URL (qcow2)").
+			Description("overrides the preset when set").
+			Placeholder("https://.../Rocky-9-GenericCloud-Base.latest.x86_64.qcow2").Value(&m.fSeedURL),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	cmd := m.form.Init()
 	if m.pcCfg != nil && len(m.images) == 0 {
@@ -332,6 +353,17 @@ func imageNameFromURL(u string) string {
 		u = u[i+1:]
 	}
 	return u
+}
+
+// presetImageName returns the preset's clean name for a known URL, else the
+// derived filename.
+func presetImageName(url string) string {
+	for _, p := range imagePresets {
+		if p.url == url {
+			return p.name
+		}
+	}
+	return imageNameFromURL(url)
 }
 
 // startImageSeed imports a disk image into Prism Central from a URL, streaming
@@ -628,14 +660,17 @@ func (m *model) onFormComplete() tea.Cmd {
 		return nil
 
 	case modalUpdateImage:
-		// If a source URL was given, seed (import) that image into Prism Central
-		// and adopt it as the deployment image; otherwise just switch to a
-		// pre-existing image.
+		// If a source URL (custom field or preset) was given, seed (import) that
+		// image into Prism Central and adopt it as the deployment image;
+		// otherwise just switch to a pre-existing image.
 		seedURL := m.fstr("seedurl")
+		if seedURL == "" {
+			seedURL = m.fstr("preset")
+		}
 		if seedURL != "" {
 			seedName := m.fstr("seedname")
 			if seedName == "" {
-				seedName = imageNameFromURL(seedURL)
+				seedName = presetImageName(seedURL)
 			}
 			if seedName == "" {
 				m.notice = "enter a name for the new image"

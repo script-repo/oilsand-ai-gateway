@@ -33,12 +33,13 @@ type poolItem struct {
 	reqs    int
 	conns   int
 	latency string
+	image   string
 }
 
 func (i poolItem) Title() string { return i.name }
 func (i poolItem) Description() string {
-	return fmt.Sprintf("%s · %d models · prio %d · %d req · %d conns · %s",
-		i.status, i.models, i.prio, i.reqs, i.conns, dashIf(i.latency))
+	return fmt.Sprintf("%s · img %s · %d models · prio %d · %d req · %d conns · %s",
+		i.status, dashIf(i.image), i.models, i.prio, i.reqs, i.conns, dashIf(i.latency))
 }
 func (i poolItem) FilterValue() string { return i.name }
 
@@ -51,12 +52,13 @@ type vmItem struct {
 	vcpu  int
 	mem   float64
 	disk  float64
+	image string
 }
 
 func (i vmItem) Title() string { return i.name }
 func (i vmItem) Description() string {
-	return fmt.Sprintf("%s · %s · %s · %dvCPU %.0fGi mem %.0fGi disk",
-		i.role, i.power, i.ip, i.vcpu, i.mem, i.disk)
+	return fmt.Sprintf("%s · %s · %s · %dvCPU %.0fGi mem %.0fGi disk · img %s",
+		i.role, i.power, i.ip, i.vcpu, i.mem, i.disk, dashIf(i.image))
 }
 func (i vmItem) FilterValue() string { return i.name }
 

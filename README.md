@@ -95,7 +95,8 @@ Sections:
 
 * **Dashboard** — live metric cards (clients, req/s, throughput, latency, success, uptime) plus a
   request-rate sparkline.
-* **Pool** — a filterable `bubbles/list` of Ollama endpoints. `a` opens the add-endpoint modal,
+* **Pool** — a filterable `bubbles/list` of Ollama endpoints; each row also shows the **source
+  image** of the backing VM. `a` opens the add-endpoint modal,
   `x` removes the selected one; both edit the gateway's `/etc/olla/olla.yaml` over SSH
   (Go `x/crypto/ssh`) and restart Olla.
 * **Models** — filterable list of pool models. `p` opens the pull modal (animated `bubbles/progress`
@@ -107,7 +108,8 @@ Sections:
 * **Load** — load-balancing visualization: per-worker cumulative request share,
   active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
   currently taking the most load.
-* **Nutanix** — Prism Central server + managed gateway/worker VMs (filterable list). `g` deploy a
+* **Nutanix** — Prism Central server + managed gateway/worker VMs (filterable list); each VM row
+  shows its **source image**. `g` deploy a
   gateway, `w` deploy a worker (auto-named, registered with the connected gateway). The worker
   deploy modal has an **Instances** field: set it above `1` to provision that many workers in
   parallel (names auto-increment, e.g. `ollama-worker-04..06`); they all register with the gateway
@@ -126,9 +128,10 @@ Sections:
   2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
   3. **Update agents** — upgrades Crush (gateway) and re-launches OpenClaw and Hermes (workers).
   4. **Update image** — changes the image used for new deployments (live PC image dropdown), and
-     can **seed a new image into Prism Central from a URL** (e.g. a Rocky Linux cloud qcow2): fill
-     in the image URL (and optional name) and it is imported via the v4 Images API, then set as the
-     deployment image. Maps to `nutanix_olla_vm.py seed-image --name <n> --image-url <url>`.
+     can **seed a new image into Prism Central**: choose a built-in **preset** (Rocky Linux 9,
+     Rocky Linux 10, Ubuntu 24.04) or paste any qcow2/img **URL** (with an optional name). It is
+     imported via the v4 Images API, then set as the deployment image. Maps to
+     `nutanix_olla_vm.py seed-image --name <n> --image-url <url>`.
   5. **Update OS** — pick gateways/workers in a multi-select, then runs `dnf -y update` on each.
   6. **Update all** — OS on every managed host, agents, Olla on gateways, and Ollama on workers.
   7. **Update Ollama cloud keys** — sets `OLLAMA_API_KEY` on one or all workers (applied via a
@@ -168,7 +171,8 @@ Beyond the built-in gateway/worker patterns, you can define your own deployment 
 * The first row, **+ add deployment**, opens a form asking for a **name** and a **setup
   script**. The setup script can be either a bare **URL** (downloaded to the VM and run with
   `sudo bash`) or a full **shell command** (e.g. `curl -fsSL <url> | sudo bash`) run verbatim on
-  the guest. Saved configs persist in `~/.oilsand-ai-gateway/tui.json`.
+  the guest. Saved configs persist in `~/.oilsand-ai-gateway/tui.json`. Two examples (`NP4M`,
+  `NRCC`) are pre-populated on first run.
 * Highlight a saved config and press **enter** to deploy: the TUI provisions a VM from the
   Nutanix settings image/cluster/subnet, waits for cloud-init, then runs your setup script/command.
   VM names auto-increment from the deployment name (e.g. `postgres-node-01`, `postgres-node-02`).

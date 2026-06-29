@@ -155,6 +155,11 @@ type model struct {
 	customDeploys []customDeploy
 	nutanixCustom bool // Nutanix section is showing the custom-deploy submenu
 
+	// image attribution: vmImages is the deploy-time VM name -> image map we
+	// record; imageByID resolves a VM's source-image extId to a name from PC.
+	vmImages  map[string]string
+	imageByID map[string]string
+
 	// agent registrations (agent name -> host it was deployed on)
 	agentReg     map[string]string
 	pendingAgent string // agent awaiting host pick
@@ -243,6 +248,7 @@ type model struct {
 	fUpdImage   string
 	fSeedName   string
 	fSeedURL    string
+	fSeedPreset string
 	fOSHosts    []string
 	fOllaKey    string
 	fOllaTarget string
@@ -304,6 +310,19 @@ func newModel(gateway, sshUser, sshPass string) model {
 	tokFile := filepath.Join(home, ".oilsand-ai-gateway", "tui.json")
 	st := loadSettings(tokFile)
 
+	// Pre-populate built-in custom deployments once. The seeded flag means
+	// deleting them all later sticks (they won't silently reappear).
+	customDeploys := st.CustomDeploys
+	seedCustom := false
+	if len(customDeploys) == 0 && !st.CustomSeeded {
+		customDeploys = defaultCustomDeploys()
+		seedCustom = true
+	}
+	vmImages := st.VMImages
+	if vmImages == nil {
+		vmImages = map[string]string{}
+	}
+
 	// Connection details come from flags/env first, then the values captured on
 	// a previous launch (first-run setup), then the built-in user fallback.
 	gateway = orDefault(gateway, st.Gateway)
@@ -352,7 +371,12 @@ func newModel(gateway, sshUser, sshPass string) model {
 		usageAgg:      usage30(loadUsage(usagePath(tokFile))),
 		agentReg:      st.Agents,
 		hermesCfg:     st.Hermes,
-		customDeploys: st.CustomDeploys,
+		customDeploys: customDeploys,
+		vmImages:      vmImages,
+		imageByID:     map[string]string{},
+	}
+	if seedCustom {
+		_ = saveCustomDeploys(tokFile, customDeploys)
 	}
 	if m.agentReg == nil {
 		m.agentReg = map[string]string{}
@@ -434,6 +458,7 @@ type vmsMsg struct {
 	clusters     []string
 	images       []string
 	subnets      []string
+	imageByID    map[string]string // image extId -> name
 	err          error
 	placementErr error // non-nil if the cluster/image/subnet queries failed
 }

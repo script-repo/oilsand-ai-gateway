@@ -112,22 +112,28 @@ type VM struct {
 	MemGiB     float64
 	DiskGiB    float64
 	Role       string
+	ImageExtID string // source image extId, when the disk still references it
 }
 
 type rawVM struct {
-	Name             string `json:"name"`
-	ExtID            string `json:"extId"`
-	PowerState       string `json:"powerState"`
-	NumSockets       int    `json:"numSockets"`
-	NumCoresPerSock  int    `json:"numCoresPerSocket"`
-	MemorySizeBytes  int64  `json:"memorySizeBytes"`
-	Nics             []struct {
+	Name            string `json:"name"`
+	ExtID           string `json:"extId"`
+	PowerState      string `json:"powerState"`
+	NumSockets      int    `json:"numSockets"`
+	NumCoresPerSock int    `json:"numCoresPerSocket"`
+	MemorySizeBytes int64  `json:"memorySizeBytes"`
+	Nics            []struct {
 		NetworkInfo    *nicNet `json:"networkInfo"`
 		NicNetworkInfo *nicNet `json:"nicNetworkInfo"`
 	} `json:"nics"`
 	Disks []struct {
 		BackingInfo struct {
 			DiskSizeBytes int64 `json:"diskSizeBytes"`
+			DataSource    *struct {
+				Reference *struct {
+					ImageExtID string `json:"imageExtId"`
+				} `json:"reference"`
+			} `json:"dataSource"`
 		} `json:"backingInfo"`
 	} `json:"disks"`
 }
@@ -252,6 +258,31 @@ func (c *PCClient) ImageNames() ([]string, error) {
 	return c.listNames("/api/vmm/%s/content/images?$limit=100")
 }
 
+// ImagesByID returns a map of image extId -> name, used to resolve the source
+// image of a VM whose disk still references it.
+func (c *PCClient) ImagesByID() (map[string]string, error) {
+	body, err := c.getVersioned("/api/vmm/%s/content/images?$limit=100")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Data []struct {
+			Name  string `json:"name"`
+			ExtID string `json:"extId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(out.Data))
+	for _, d := range out.Data {
+		if d.ExtID != "" {
+			m[d.ExtID] = d.Name
+		}
+	}
+	return m, nil
+}
+
 // SubnetNames lists the names of subnets on Prism Central.
 func (c *PCClient) SubnetNames() ([]string, error) {
 	return c.listNames("/api/networking/%s/config/subnets?$limit=100")
@@ -281,20 +312,26 @@ func summarizeVM(r rawVM) VM {
 		}
 	}
 	var diskBytes int64
+	imageExtID := ""
 	for _, d := range r.Disks {
 		if d.BackingInfo.DiskSizeBytes > diskBytes {
 			diskBytes = d.BackingInfo.DiskSizeBytes
 		}
+		if imageExtID == "" && d.BackingInfo.DataSource != nil &&
+			d.BackingInfo.DataSource.Reference != nil {
+			imageExtID = d.BackingInfo.DataSource.Reference.ImageExtID
+		}
 	}
 	return VM{
-		Name:    r.Name,
-		ExtID:   r.ExtID,
-		Power:   r.PowerState,
-		IP:      ip,
-		VCPU:    r.NumSockets * r.NumCoresPerSock,
-		MemGiB:  float64(r.MemorySizeBytes) / (1024 * 1024 * 1024),
-		DiskGiB: float64(diskBytes) / (1024 * 1024 * 1024),
-		Role:    vmRole(r.Name),
+		Name:       r.Name,
+		ExtID:      r.ExtID,
+		Power:      r.PowerState,
+		IP:         ip,
+		VCPU:       r.NumSockets * r.NumCoresPerSock,
+		MemGiB:     float64(r.MemorySizeBytes) / (1024 * 1024 * 1024),
+		DiskGiB:    float64(diskBytes) / (1024 * 1024 * 1024),
+		Role:       vmRole(r.Name),
+		ImageExtID: imageExtID,
 	}
 }
 

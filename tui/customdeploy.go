@@ -34,6 +34,14 @@ func (i customItem) Description() string {
 
 func (i customItem) FilterValue() string { return i.Title() }
 
+// defaultCustomDeploys are the built-in deployment types seeded on first run.
+func defaultCustomDeploys() []customDeploy {
+	return []customDeploy{
+		{Name: "NP4M", ScriptURL: "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash"},
+		{Name: "NRCC", ScriptURL: "curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-console-client/main/install.sh | bash"},
+	}
+}
+
 // refreshCustomList rebuilds the submenu: the "add deployment" row first, then
 // one row per saved custom deployment type.
 func (m *model) refreshCustomList() {

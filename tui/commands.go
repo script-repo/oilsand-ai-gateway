@@ -82,8 +82,10 @@ func vmsCmd(cfg *PCConfig) tea.Cmd {
 		clusters, cerr := pc.ClusterNames()
 		images, ierr := pc.ImageNames()
 		subnets, serr := pc.SubnetNames()
+		imageByID, _ := pc.ImagesByID()
 		return vmsMsg{
 			vms: vms, clusters: clusters, images: images, subnets: subnets,
+			imageByID:    imageByID,
 			err:          err,
 			placementErr: firstErr(cerr, ierr, serr),
 		}
@@ -360,6 +362,8 @@ type tuiSettings struct {
 	Agents        map[string]string `json:"agents"` // agent name -> deployed host
 	Hermes        hermesSettings    `json:"hermes"`
 	CustomDeploys []customDeploy    `json:"custom_deploys"` // user-defined deployment types
+	CustomSeeded  bool              `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
+	VMImages      map[string]string `json:"vm_images"`      // VM name -> source image name
 }
 
 // customDeploy is a user-defined Nutanix deployment type: a friendly name plus
@@ -547,10 +551,19 @@ func saveDeployPC(path string, d deploySettings, pc pcOverride) error {
 	return saveSettings(path, s)
 }
 
-// saveCustomDeploys persists the user-defined custom deployment types.
+// saveCustomDeploys persists the user-defined custom deployment types and marks
+// the built-in defaults as seeded (so deleting them all doesn't re-add them).
 func saveCustomDeploys(path string, cds []customDeploy) error {
 	s := loadSettings(path)
 	s.CustomDeploys = cds
+	s.CustomSeeded = true
+	return saveSettings(path, s)
+}
+
+// saveVMImages persists the VM name -> source image map.
+func saveVMImages(path string, m map[string]string) error {
+	s := loadSettings(path)
+	s.VMImages = m
 	return saveSettings(path, s)
 }
 

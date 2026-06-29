@@ -142,8 +142,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.placementErr != nil {
 			m.notice = "PC inventory query failed (deploy dropdowns unavailable): " + msg.placementErr.Error()
 		}
+		if len(msg.imageByID) > 0 {
+			m.imageByID = msg.imageByID
+		}
 		m.vms = msg.vms
 		m.refreshVMs()
+		m.refreshPool()
 		return m, nil
 
 	case chatEvMsg:
@@ -1332,6 +1336,24 @@ func parseBatchEndpoint(line string) (batchEndpoint, bool) {
 	return ep, true
 }
 
+// parseVMRecord extracts a deploy-time "OILSAND_VM {name,image}" line emitted by
+// provision_vm, so the TUI can attribute the source image to each VM it deploys.
+func parseVMRecord(line string) (name, image string, ok bool) {
+	const marker = "OILSAND_VM "
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return "", "", false
+	}
+	var rec struct {
+		Name  string `json:"name"`
+		Image string `json:"image"`
+	}
+	if err := json.Unmarshal([]byte(line[i+len(marker):]), &rec); err != nil || rec.Name == "" {
+		return "", "", false
+	}
+	return rec.Name, rec.Image, true
+}
+
 func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 	if ev.Line != "" {
 		m.logLines = append(m.logLines, ev.Line)
@@ -1343,6 +1365,13 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			if ep, ok := parseBatchEndpoint(ev.Line); ok {
 				m.batch.endpoints = append(m.batch.endpoints, ep)
 			}
+		}
+		if name, image, ok := parseVMRecord(ev.Line); ok {
+			if m.vmImages == nil {
+				m.vmImages = map[string]string{}
+			}
+			m.vmImages[name] = image
+			_ = saveVMImages(m.tokFile, m.vmImages)
 		}
 	}
 	if ev.Done {
@@ -1420,6 +1449,7 @@ func (m *model) refreshPool() {
 			name: e.Name, status: e.Status, models: e.Models.Count,
 			prio: e.Priority, reqs: e.Requests, conns: e.Connections,
 			latency: e.AvgLatency,
+			image:   m.imageForVM(e.Name, hostFromURL(e.URL)),
 		})
 	}
 	m.poolList.SetItems(items)
@@ -1454,10 +1484,32 @@ func (m *model) refreshVMs() {
 		items = append(items, vmItem{
 			name: v.Name, role: role, power: v.Power, ip: v.IP,
 			vcpu: v.VCPU, mem: v.MemGiB, disk: v.DiskGiB,
+			image: m.imageForVM(v.Name, v.IP),
 		})
 	}
 	m.vmsList.SetItems(items)
 	m.lockVMsPaging()
+}
+
+// imageForVM resolves the source image of a VM, preferring the deploy-time
+// record we persisted, then the live PC dataSource reference (by name/IP match).
+func (m *model) imageForVM(name, ip string) string {
+	if img := m.vmImages[name]; img != "" {
+		return img
+	}
+	for _, v := range m.vms {
+		if (name != "" && v.Name == name) || (ip != "" && v.IP == ip) {
+			if v.ImageExtID != "" {
+				if n := m.imageByID[v.ImageExtID]; n != "" {
+					return n
+				}
+			}
+			if img := m.vmImages[v.Name]; img != "" {
+				return img
+			}
+		}
+	}
+	return ""
 }
 
 // customVMPrefixes returns the VM-name prefixes that identify custom-deploy VMs:
