@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# --- CRLF self-heal: if this file was saved/transferred with Windows (CRLF) line -----
+# --- endings, transparently re-exec a cleaned copy. You should never need dos2unix. --
+[ -z "${NAI_DECRLF:-}" ] && grep -q $'\r' "$0" 2>/dev/null && NAI_DECRLF=1 exec bash <(tr -d '\r' < "$0") "$@"
 #
 # deploy-nai-scenario-d-inguest.sh
 # ================================
@@ -9,6 +12,9 @@
 # VM provisioning, SSH, and scp. You bring your own Ubuntu VM (already sized with enough
 # CPU/RAM/disk and on a subnet where you can carve out a MetalLB range); this script does
 # only the in-guest install: MicroK8s -> add-ons -> AI-gateway prereqs -> NAI 2.7 -> TLS/UI.
+#
+# Platform: LINUX ONLY. Run this on the target Ubuntu VM itself (not on your workstation).
+# No dos2unix required - the script detects and self-heals Windows line endings above.
 #
 # Requirements on the VM:
 #   * Ubuntu 24.04 with snap + sudo (passwordless sudo recommended for a hands-off run)
@@ -23,19 +29,46 @@
 #   DOCKER_USERNAME=me DOCKER_PAT=xxx DOCKER_EMAIL=me@x.com METALLB_RANGE=10.0.0.240-10.0.0.250 \
 #     NONINTERACTIVE=yes ./deploy-nai-scenario-d-inguest.sh
 #
+#   NOTE on line endings: if this file was hand-copied/edited through a Windows tool and
+#   ended up with CRLF on every line (including the #! line itself), the kernel can fail
+#   to even locate bash before our CRLF self-heal code (above) gets a chance to run - no
+#   script can fix that from the inside. If `./deploy-nai-scenario-d-inguest.sh` ever
+#   errors immediately with something like "bad interpreter", run it as
+#   `bash deploy-nai-scenario-d-inguest.sh` instead: that bypasses the OS's #! lookup
+#   entirely, and the self-heal line still cleans up and re-execs correctly.
+#
 # Lessons baked in (see NAI-2.7-ScenarioD-Deployment.md):
 #   * containerd Docker Hub auth is configured BEFORE any NAI image is pulled.
 #   * ClickHouse CPU request is right-sized via a Helm value (upgrade-safe).
 #   * Generous Helm --timeout values; idempotent (safe to re-run).
+#   * The requested MetalLB range is probed (ping + TCP) before use; MetalLB itself does
+#     not check for collisions and will happily ARP-announce an IP someone else already owns.
 #
 set -euo pipefail
+
+DEPLOY_START_EPOCH=$(date +%s)
+DEPLOY_START_HUMAN=$(date)
+
+nai_report_elapsed(){
+  local rc=$? end secs mins remsecs
+  end=$(date +%s)
+  secs=$(( end - DEPLOY_START_EPOCH ))
+  mins=$(( secs / 60 )); remsecs=$(( secs % 60 ))
+  echo
+  if [ "$rc" -eq 0 ]; then
+    printf '\033[1;32m[+]\033[0m Finished: %s  (total elapsed: %dm %ds)\n' "$(date)" "$mins" "$remsecs"
+  else
+    printf '\033[1;31m[x]\033[0m Exited with code %d: %s  (total elapsed: %dm %ds)\n' "$rc" "$(date)" "$mins" "$remsecs" >&2
+  fi
+}
+trap nai_report_elapsed EXIT
 
 # --------------------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------------------
 c_info(){ printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 c_ok(){   printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-c_warn(){ printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
+c_warn(){ printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 c_err(){  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 die(){ c_err "$*"; exit 1; }
 log(){ echo; echo "=========== $* ==========="; }
@@ -62,14 +95,76 @@ ask_yn(){ local __v="$1" __p="$2" __d="${3:-y}" __cur __in
   case "$__in" in [Yy]*) printf -v "$__v" 'yes';; *) printf -v "$__v" 'no';; esac; }
 
 # --------------------------------------------------------------------------------------
+# MetalLB range collision check (ping + TCP; MetalLB does not check for collisions itself)
+# --------------------------------------------------------------------------------------
+ip_to_int(){ local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24) + (b<<16) + (c<<8) + d )); }
+int_to_ip(){ local i="$1"; echo "$(( (i>>24)&255 )).$(( (i>>16)&255 )).$(( (i>>8)&255 )).$(( i&255 ))"; }
+
+# host_responds IP : returns 0 (in use) if ping OR a quick TCP connect on common ports succeeds
+host_responds(){
+  local ip="$1" port
+  ping -c1 -W1 "$ip" >/dev/null 2>&1 && return 0
+  for port in 22 80 443 445 3389 9440 8443; do
+    timeout 1 bash -c "echo >/dev/tcp/${ip}/${port}" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+check_metallb_range(){
+  local range="$1" sip eip si ei count ip a tmpdir
+  local -a conflicts=()
+  local ipre='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  case "$range" in
+    *-*) sip="${range%-*}"; eip="${range#*-}" ;;
+    *)   c_warn "MetalLB range '$range' is not a start-end range; skipping collision check."; return 0 ;;
+  esac
+  [[ "$sip" =~ $ipre ]] && [[ "$eip" =~ $ipre ]] || { c_warn "Could not parse '$range' as start-end IPs; skipping collision check."; return 0; }
+  si=$(ip_to_int "$sip"); ei=$(ip_to_int "$eip")
+  [ "$si" -le "$ei" ] || { c_warn "MetalLB range start is after end; skipping collision check."; return 0; }
+  count=$(( ei - si + 1 ))
+  if [ "$count" -gt 64 ]; then
+    c_warn "MetalLB range has ${count} addresses; only scanning the first 64 for collisions."
+    ei=$(( si + 63 ))
+  fi
+  c_info "Checking ${sip}-$(int_to_ip "$ei") for hosts already using these addresses (ping + TCP probe) ..."
+  tmpdir=$(mktemp -d)
+  for (( ip=si; ip<=ei; ip++ )); do
+    a=$(int_to_ip "$ip")
+    ( host_responds "$a" && touch "$tmpdir/$a" ) &
+  done
+  wait
+  for a in "$tmpdir"/*; do [ -e "$a" ] && conflicts+=("$(basename "$a")"); done
+  rm -rf "$tmpdir"
+
+  if [ "${#conflicts[@]}" -gt 0 ]; then
+    c_warn "The following address(es) in the MetalLB range already respond (ping or TCP) and may be IN USE:"
+    printf '        %s\n' "${conflicts[@]}" >&2
+    c_warn "MetalLB does NOT check for collisions - assigning an address someone else owns causes"
+    c_warn "ARP conflicts / intermittent connectivity once the gateway starts advertising it."
+    if [ "${METALLB_FORCE:-no}" = "yes" ]; then
+      c_warn "METALLB_FORCE=yes set - proceeding despite the warning above."
+    elif [ "$NONINTERACTIVE" = "yes" ]; then
+      die "Aborting (NONINTERACTIVE mode). Pick a different METALLB_RANGE or re-run with METALLB_FORCE=yes."
+    else
+      ask_yn PROCEED_DESPITE_CONFLICT "Continue anyway with this potentially conflicting range?" "n"
+      [ "$PROCEED_DESPITE_CONFLICT" = "yes" ] || die "Aborted - choose a different METALLB_RANGE and re-run."
+    fi
+  else
+    c_ok "No responses from any address in ${sip}-$(int_to_ip "$ei") - range looks free."
+  fi
+}
+
+# --------------------------------------------------------------------------------------
 # preflight
 # --------------------------------------------------------------------------------------
+[ "$(uname -s)" = "Linux" ] || die "This script is Linux-only. Run it on the target Ubuntu VM itself, not on your workstation."
 [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null || \
   c_warn "passwordless sudo not detected; you may be prompted for your sudo password during the run."
 command -v snap >/dev/null 2>&1 || die "snap not found - this script targets Ubuntu with snapd."
 if ! grep -qi '24.04' /etc/os-release 2>/dev/null; then
   c_warn "This VM does not look like Ubuntu 24.04; continuing anyway."
 fi
+c_info "Started: ${DEPLOY_START_HUMAN}"
 
 # --------------------------------------------------------------------------------------
 # variables (prompt, with env pre-seed)
@@ -82,7 +177,12 @@ ask        DOCKER_USERNAME  "Docker Hub username (NAI entitlement)"
 ask_secret DOCKER_PAT       "Docker Hub password / PAT"
 ask        DOCKER_EMAIL     "Docker Hub email"
 ask        REGISTRY_SERVER  "Registry server" "https://index.docker.io/v1/"
+[ -n "${DOCKER_USERNAME}" ] && [ -n "${DOCKER_PAT}" ] && [ -n "${DOCKER_EMAIL}" ] || die "Docker Hub credentials are required."
+
 ask        METALLB_RANGE    "MetalLB address range on this VM's subnet (outside the DHCP pool), e.g. 10.0.0.240-10.0.0.250"
+[ -n "${METALLB_RANGE}" ] || die "METALLB_RANGE is required."
+check_metallb_range "${METALLB_RANGE}"
+
 ask        NAI_VERSION      "NAI chart version" "2.7.0"
 ask        MICROK8S_CHANNEL "MicroK8s snap channel" "1.32/stable"
 ask        STORAGE_CLASS    "Kubernetes StorageClass" "microk8s-hostpath"
@@ -95,9 +195,6 @@ ask        REGCRED_NAME     "Image pull secret name" "nai-regcred"
 ENVOY_GW_VERSION="${ENVOY_GW_VERSION:-v1.7.0}"
 KSERVE_VERSION="${KSERVE_VERSION:-v0.15.0}"
 OTEL_OP_VERSION="${OTEL_OP_VERSION:-0.102.0}"
-
-[ -n "${DOCKER_USERNAME}" ] && [ -n "${DOCKER_PAT}" ] && [ -n "${DOCKER_EMAIL}" ] || die "Docker Hub credentials are required."
-[ -n "${METALLB_RANGE}" ] || die "METALLB_RANGE is required."
 
 echo
 c_info "Deploying NAI ${NAI_VERSION} on this VM:"
