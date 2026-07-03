@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# --- CRLF self-heal: if this file was saved/transferred with Windows (CRLF) line -----
+# --- endings, transparently re-exec a cleaned copy. You should never need dos2unix. --
+[ -z "${NAI_DECRLF:-}" ] && grep -q $'\r' "$0" 2>/dev/null && NAI_DECRLF=1 exec bash <(tr -d '\r' < "$0") "$@"
 #
 # deploy-nai-scenario-d.sh
 # =========================
@@ -15,6 +18,12 @@
 #
 # Required local tools: bash, curl, jq, ssh, scp, sshpass, base64, awk, sed.
 #
+# NOTE on line endings: no dos2unix required - the guard above self-heals CRLF. If the
+# #! line itself ever gets CRLF-corrupted (e.g. by a Windows editor's "Save As"), the OS
+# can fail to even locate bash before that guard runs; if `./deploy-nai-scenario-d.sh`
+# errors immediately with something like "bad interpreter", run `bash deploy-nai-scenario-d.sh`
+# instead - that bypasses the OS's #! lookup entirely and the guard still cleans it up.
+#
 # Lessons baked in (see the companion NAI-2.7-ScenarioD-Deployment.md for the "why"):
 #   * VM is created at its final size WITH memory overcommit up front (no resize/power cycle).
 #   * Docker Hub registry auth is written into containerd BEFORE any NAI image is pulled,
@@ -22,23 +31,44 @@
 #   * ClickHouse CPU request is right-sized through Helm values (not a post-hoc CR patch),
 #     so it survives future `helm upgrade`s.
 #   * Helm installs use generous --timeout values and run idempotently.
+#   * The requested MetalLB range is probed (ping + TCP) on the guest before use; MetalLB
+#     itself does not check for collisions and will happily ARP-announce an IP someone
+#     else already owns.
 #
 # SAFETY: this script CREATES and POWERS ON a VM and installs software on it. Review the
 # confirmation summary before typing "yes".
 #
 set -euo pipefail
 
+DEPLOY_START_EPOCH=$(date +%s)
+DEPLOY_START_HUMAN=$(date)
+
+nai_report_elapsed(){
+  local rc=$? end secs mins remsecs
+  end=$(date +%s)
+  secs=$(( end - DEPLOY_START_EPOCH ))
+  mins=$(( secs / 60 )); remsecs=$(( secs % 60 ))
+  echo
+  if [ "$rc" -eq 0 ]; then
+    printf '\033[1;32m[+]\033[0m Finished: %s  (total elapsed: %dm %ds)\n' "$(date)" "$mins" "$remsecs"
+  else
+    printf '\033[1;31m[x]\033[0m Exited with code %d: %s  (total elapsed: %dm %ds)\n' "$rc" "$(date)" "$mins" "$remsecs" >&2
+  fi
+}
+trap nai_report_elapsed EXIT
+
 # --------------------------------------------------------------------------------------
 # 0. helpers
 # --------------------------------------------------------------------------------------
 c_info(){ printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
 c_ok(){   printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
-c_warn(){ printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
+c_warn(){ printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 c_err(){  printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 die(){ c_err "$*"; exit 1; }
 
 need(){ command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
 for t in curl jq ssh scp sshpass base64 awk sed; do need "$t"; done
+c_info "Started: ${DEPLOY_START_HUMAN}"
 
 # ask VAR "Prompt" "default"
 ask(){ local __v="$1" __p="$2" __d="${3:-}" __in
@@ -107,6 +137,9 @@ ask OBS_NAMESPACE    "Observability namespace (Prometheus stack)" "observability
 ENVOY_GW_VERSION="${ENVOY_GW_VERSION:-v1.7.0}"
 KSERVE_VERSION="${KSERVE_VERSION:-v0.15.0}"
 OTEL_OP_VERSION="${OTEL_OP_VERSION:-0.102.0}"
+# Set METALLB_FORCE=yes in the environment beforehand to skip/override the MetalLB
+# range collision check (the guest installer probes the range with ping+TCP first).
+METALLB_FORCE="${METALLB_FORCE:-no}"
 
 # convert sizes
 MEM_BYTES=$(( RAM_GB  * 1073741824 ))
@@ -277,15 +310,72 @@ GUEST_SCRIPT=$(mktemp)
 cat > "$GUEST_SCRIPT" <<'GUESTEOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[ "$(uname -s)" = "Linux" ] || { echo "ERROR: guest installer is Linux-only" >&2; exit 1; }
 : "${DOCKER_USERNAME:?}"; : "${DOCKER_PAT:?}"; : "${DOCKER_EMAIL:?}"; : "${METALLB_RANGE:?}"
 NAI_VERSION="${NAI_VERSION:-2.7.0}"; MICROK8S_CHANNEL="${MICROK8S_CHANNEL:-1.32/stable}"
 STORAGE_CLASS="${STORAGE_CLASS:-microk8s-hostpath}"; CH_CPU_REQUEST="${CH_CPU_REQUEST:-1}"
 ENVOY_GW_VERSION="${ENVOY_GW_VERSION:-v1.7.0}"; KSERVE_VERSION="${KSERVE_VERSION:-v0.15.0}"
 OTEL_OP_VERSION="${OTEL_OP_VERSION:-0.102.0}"; OBS_NAMESPACE="${OBS_NAMESPACE:-observability}"
 REGISTRY_SERVER="${REGISTRY_SERVER:-https://index.docker.io/v1/}"; REGCRED_NAME="${REGCRED_NAME:-nai-regcred}"
-NAI_NAMESPACE="${NAI_NAMESPACE:-nai-system}"
+NAI_NAMESPACE="${NAI_NAMESPACE:-nai-system}"; METALLB_FORCE="${METALLB_FORCE:-no}"
 K="sudo microk8s kubectl"; H="sudo microk8s helm3"
 log(){ echo; echo "=========== $* ==========="; }
+c_warn(){ printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
+c_ok(){   printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
+c_info(){ printf '\033[1;34m[*]\033[0m %s\n' "$*"; }
+
+# --- MetalLB range collision check (ping + TCP; MetalLB does not check for collisions) ---
+ip_to_int(){ local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24) + (b<<16) + (c<<8) + d )); }
+int_to_ip(){ local i="$1"; echo "$(( (i>>24)&255 )).$(( (i>>16)&255 )).$(( (i>>8)&255 )).$(( i&255 ))"; }
+host_responds(){
+  local ip="$1" port
+  ping -c1 -W1 "$ip" >/dev/null 2>&1 && return 0
+  for port in 22 80 443 445 3389 9440 8443; do
+    timeout 1 bash -c "echo >/dev/tcp/${ip}/${port}" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+check_metallb_range(){
+  local range="$1" sip eip si ei count ip a tmpdir
+  local -a conflicts=()
+  local ipre='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  case "$range" in
+    *-*) sip="${range%-*}"; eip="${range#*-}" ;;
+    *)   c_warn "MetalLB range '$range' is not a start-end range; skipping collision check."; return 0 ;;
+  esac
+  [[ "$sip" =~ $ipre ]] && [[ "$eip" =~ $ipre ]] || { c_warn "Could not parse '$range' as start-end IPs; skipping collision check."; return 0; }
+  si=$(ip_to_int "$sip"); ei=$(ip_to_int "$eip")
+  [ "$si" -le "$ei" ] || { c_warn "MetalLB range start is after end; skipping collision check."; return 0; }
+  count=$(( ei - si + 1 ))
+  if [ "$count" -gt 64 ]; then
+    c_warn "MetalLB range has ${count} addresses; only scanning the first 64 for collisions."
+    ei=$(( si + 63 ))
+  fi
+  c_info "Checking ${sip}-$(int_to_ip "$ei") for hosts already using these addresses (ping + TCP probe) ..."
+  tmpdir=$(mktemp -d)
+  for (( ip=si; ip<=ei; ip++ )); do
+    a=$(int_to_ip "$ip")
+    ( host_responds "$a" && touch "$tmpdir/$a" ) &
+  done
+  wait
+  for a in "$tmpdir"/*; do [ -e "$a" ] && conflicts+=("$(basename "$a")"); done
+  rm -rf "$tmpdir"
+  if [ "${#conflicts[@]}" -gt 0 ]; then
+    c_warn "The following address(es) in the MetalLB range already respond (ping or TCP) and may be IN USE:"
+    printf '        %s\n' "${conflicts[@]}" >&2
+    c_warn "MetalLB does NOT check for collisions - assigning an address someone else owns causes"
+    c_warn "ARP conflicts / intermittent connectivity once the gateway starts advertising it."
+    if [ "$METALLB_FORCE" = "yes" ]; then
+      c_warn "METALLB_FORCE=yes set - proceeding despite the warning above."
+    else
+      echo "ERROR: potential MetalLB IP collision. Re-run with METALLB_FORCE=yes to override, or choose a different METALLB_RANGE." >&2
+      exit 1
+    fi
+  else
+    c_ok "No responses from any address in ${sip}-$(int_to_ip "$ei") - range looks free."
+  fi
+}
+check_metallb_range "${METALLB_RANGE}"
 
 log "D.2 Install MicroK8s ${MICROK8S_CHANNEL}"
 snap list microk8s >/dev/null 2>&1 || sudo snap install microk8s --classic --channel="${MICROK8S_CHANNEL}"
@@ -445,7 +535,7 @@ sshpass -p "$GUEST_PASSWORD" ssh "${SSH_OPTS[@]}" "${GUEST_USER}@${VM_IP}" \
    METALLB_RANGE='${METALLB_RANGE}' NAI_VERSION='${NAI_VERSION}' MICROK8S_CHANNEL='${MICROK8S_CHANNEL}' \
    STORAGE_CLASS='${STORAGE_CLASS}' CH_CPU_REQUEST='${CH_CPU_REQUEST}' OBS_NAMESPACE='${OBS_NAMESPACE}' \
    ENVOY_GW_VERSION='${ENVOY_GW_VERSION}' KSERVE_VERSION='${KSERVE_VERSION}' OTEL_OP_VERSION='${OTEL_OP_VERSION}' \
-   REGISTRY_SERVER='${REGISTRY_SERVER}' bash /tmp/nai-guest.sh" | tee /tmp/nai-deploy-guest.out
+   REGISTRY_SERVER='${REGISTRY_SERVER}' METALLB_FORCE='${METALLB_FORCE}' bash /tmp/nai-guest.sh" | tee /tmp/nai-deploy-guest.out
 
 # --------------------------------------------------------------------------------------
 # 6. final report
