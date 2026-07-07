@@ -4,18 +4,63 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
+  # On a push to main (i.e. a merged PR), compute the next patch version from
+  # the latest existing "vX.Y.Z" tag and push it. Tag pushes trigger this same
+  # workflow, but a bot-authored push never re-triggers Actions, so goreleaser
+  # runs directly below instead of waiting for that event.
+  autotag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next patch tag
+        id: tag
+        run: |
+          git fetch --tags -q
+          last="$(git tag --list 'v*' | sort -V | tail -n1)"
+          if [ -z "$last" ]; then
+            next="v0.1.0"
+          else
+            ver="${last#v}"
+            major="${ver%%.*}"
+            rest="${ver#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "next release: $next (previous: ${last:-none})"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.tag.outputs.tag }}" -m "Automated release ${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}"
+
   goreleaser:
+    needs: [autotag]
+    if: always() && (github.ref_type == 'tag' || needs.autotag.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.autotag.outputs.tag || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
