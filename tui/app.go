@@ -167,9 +167,10 @@ type model struct {
 	imageByID map[string]string
 
 	// agent registrations (agent name -> host it was deployed on)
-	agentReg     map[string]string
-	pendingAgent string // agent awaiting host pick
-	pendingAct   string // "open" | "deploy"
+	agentReg       map[string]string
+	pendingAgent   string // agent awaiting host pick
+	pendingAct     string // "open" | "deploy"
+	agentInstances int    // container count for the next containerized-agent deploy
 
 	chatVP   viewport.Model
 	logVP    viewport.Model
@@ -243,7 +244,8 @@ type model struct {
 	fVMUser  string
 	fVMPass  string
 	// agent host picker
-	fAgentHost string
+	fAgentHost  string
+	fAgentCount string // instances for containerized agents (Nanoclaw)
 	// hermes gateway / telegram settings form values
 	fTgToken   string
 	fTgAllowed string

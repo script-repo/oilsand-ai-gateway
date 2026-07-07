@@ -474,6 +474,9 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			return m, m.sendChat()
+		case "ctrl+n":
+			m.newChatSession()
+			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.composer, cmd = m.composer.Update(msg)
@@ -657,6 +660,60 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 
 // ---- chat ------------------------------------------------------------------
 
+// Session memory: every request replays the recent conversation so the model
+// keeps context across turns, bounded so long sessions can't overflow the
+// model's context window. Ctrl+N starts a fresh session.
+const (
+	chatHistoryMaxTurns = 24
+	chatHistoryMaxChars = 24000
+)
+
+// chatMessages converts the session history (which already includes the
+// just-appended user turn) into the OpenAI messages payload, keeping only the
+// most recent turns within the turn/char budgets.
+func (m *model) chatMessages() []ChatMessage {
+	turns := m.history
+	if len(turns) > chatHistoryMaxTurns {
+		turns = turns[len(turns)-chatHistoryMaxTurns:]
+	}
+	start, chars := 0, 0
+	for i := len(turns) - 1; i > 0; i-- {
+		chars += len(turns[i].content)
+		if chars > chatHistoryMaxChars {
+			start = i
+			break
+		}
+	}
+	msgs := make([]ChatMessage, 0, len(turns)-start)
+	for _, t := range turns[start:] {
+		role := "user"
+		if t.role == roleBot {
+			role = "assistant"
+		}
+		msgs = append(msgs, ChatMessage{Role: role, Content: t.content})
+	}
+	return msgs
+}
+
+// newChatSession clears the conversation (and its per-session stats) so the
+// next prompt starts with no prior context.
+func (m *model) newChatSession() {
+	if m.streaming {
+		m.notice = "wait for the current reply to finish before starting a new session"
+		return
+	}
+	if len(m.history) == 0 && m.partial == "" {
+		m.notice = "already a fresh session"
+		return
+	}
+	m.history = nil
+	m.partial = ""
+	m.lastTTFT, m.lastTokS = 0, 0
+	m.chatTokens, m.chatTotalTokens = 0, 0
+	m.renderChat()
+	m.notice = "new chat session — previous context cleared"
+}
+
 func (m *model) sendChat() tea.Cmd {
 	if m.client == nil {
 		m.notice = "connect to a gateway first"
@@ -684,7 +741,25 @@ func (m *model) sendChat() tea.Cmd {
 	m.chatStart = time.Now()
 	m.chatFirst = time.Time{}
 	m.chatCh = make(chan ChatEvent, 64)
-	go m.client.ChatStream(mdl, []ChatMessage{{Role: "user", Content: text}}, m.chatCh)
+	msgs := m.chatMessages()
+	urls := extractURLs(text)
+	client, ch := m.client, m.chatCh
+	go func() {
+		// Web fetch happens in the stream goroutine so the UI keeps spinning;
+		// fetched pages are injected as a system message ahead of the prompt.
+		if len(urls) > 0 {
+			ch <- ChatEvent{Kind: "note", Content: fmt.Sprintf("web: fetching %d page(s)…", len(urls))}
+			ctx, note := webContext(urls)
+			if ctx != "" {
+				last := msgs[len(msgs)-1]
+				msgs = append(msgs[:len(msgs)-1], ChatMessage{Role: "system", Content: ctx}, last)
+			}
+			if note != "" {
+				ch <- ChatEvent{Kind: "note", Content: note}
+			}
+		}
+		client.ChatStream(mdl, msgs, ch)
+	}()
 	m.renderChat()
 	return waitChat(m.chatCh)
 }
@@ -708,6 +783,9 @@ func (m model) handleChat(ev ChatEvent) (tea.Model, tea.Cmd) {
 				m.chatTotalTokens = ev.Usage.TotalTokens
 			}
 		}
+	case "note":
+		// Progress from the web-fetch phase; shown in the status line.
+		m.notice = ev.Content
 	case "error":
 		m.partial += "\n\n*error: " + errStr(ev.Err) + "*"
 		m.finishChat()
@@ -1110,6 +1188,9 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		if a.name == "Hermes" && m.hermesGatewayWanted() {
 			m.notice = fmt.Sprintf("deploying %s + Telegram gateway on %s (unattended)…", a.name, where)
 		}
+		if a.container {
+			m.notice = fmt.Sprintf("deploying %d %s container(s) on %s…", maxInt(m.agentInstances, 1), a.name, where)
+		}
 		script := m.agentDeployScript(a)
 		if local {
 			if a.name == "Crush" {
@@ -1123,6 +1204,14 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		return deployAgentCmd(m.sshUser, host, m.sshPass, script, a.name, a.name+" deploy")
 	}
 	m.notice = fmt.Sprintf("opening %s on %s…", a.name, host)
+	if a.name == "Nanoclaw" {
+		// Nanoclaw runs as container(s): open lists the instances and follows
+		// the newest one's logs instead of launching a CLI.
+		if local {
+			return localNanoclawOpenCmd()
+		}
+		return nanoclawOpenCmd(m.sshUser, host, m.sshPass)
+	}
 	if local {
 		if a.name == "Crush" {
 			return localCrushCmd(m.crushConfigJSON(), "", a.name, "")

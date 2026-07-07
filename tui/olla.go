@@ -128,9 +128,10 @@ func (c *OllaClient) getJSON(ctx context.Context, path string, dst any) error {
 
 // ---- streaming chat --------------------------------------------------------
 
-// ChatEvent is one item emitted while streaming a completion.
+// ChatEvent is one item emitted while streaming a completion. "note" carries
+// out-of-band progress (e.g. the web-fetch phase) for the status line.
 type ChatEvent struct {
-	Kind    string // "first" | "delta" | "usage" | "done" | "error"
+	Kind    string // "first" | "delta" | "usage" | "note" | "done" | "error"
 	Content string
 	Usage   *ChatUsage
 	Err     error
