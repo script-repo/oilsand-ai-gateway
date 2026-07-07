@@ -195,8 +195,9 @@ func (m *model) updateAgentsPlan() tea.Cmd {
 		})
 	}
 	// Nanoclaw only updates where it was actually deployed (its containers live
-	// on that specific worker, unlike the ollama-launched agents).
-	if host := m.agentReg["Nanoclaw"]; host != "" {
+	// on specific workers, unlike the ollama-launched agents) — one step per
+	// worker that ever received a deploy.
+	for _, host := range m.nanoclawHosts() {
 		steps = append(steps, updateStep{
 			title: "Update Nanoclaw containers on " + host, host: host, user: user, pass: m.sshPass,
 			script: nanoclawUpdateScript(),
@@ -292,13 +293,25 @@ func (m *model) updateAgentsSteps() []updateStep {
 			script: fmt.Sprintf("ollama launch hermes --yes --model %s </dev/null || true\n", model) + m.hermesOllaConfigScript(model),
 		})
 	}
-	if host := m.agentReg["Nanoclaw"]; host != "" {
+	for _, host := range m.nanoclawHosts() {
 		steps = append(steps, updateStep{
 			title: "Update Nanoclaw containers on " + host, host: host, user: user, pass: m.sshPass,
 			script: nanoclawUpdateScript(),
 		})
 	}
 	return steps
+}
+
+// nanoclawHosts returns every worker Nanoclaw was deployed on, falling back to
+// the single most-recent registration for configs saved before host lists.
+func (m *model) nanoclawHosts() []string {
+	if hs := m.agentHosts["Nanoclaw"]; len(hs) > 0 {
+		return hs
+	}
+	if h := m.agentReg["Nanoclaw"]; h != "" {
+		return []string{h}
+	}
+	return nil
 }
 
 // updateSummary is a short status string for the Output header.

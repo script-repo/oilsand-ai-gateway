@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -47,11 +48,15 @@ func TestChatMessagesCharCap(t *testing.T) {
 		{role: roleUser, content: "latest"},
 	}
 	msgs := m.chatMessages()
-	if len(msgs) == 0 || msgs[len(msgs)-1].Content != "latest" {
-		t.Fatalf("latest turn must survive trimming: %d msgs", len(msgs))
+	// The turn that exceeds the budget is dropped too, so only "latest" remains.
+	if len(msgs) != 1 || msgs[0].Content != "latest" {
+		t.Fatalf("expected only the latest turn after trimming, got %d msgs", len(msgs))
 	}
-	if len(msgs) == 3 {
-		t.Fatalf("oversized old turns should have been trimmed, got all %d", len(msgs))
+
+	// A latest turn that alone exceeds the budget must still be sent.
+	m.history = []chatTurn{{role: roleUser, content: big + big}}
+	if msgs := m.chatMessages(); len(msgs) != 1 {
+		t.Fatalf("oversized latest turn must survive, got %d msgs", len(msgs))
 	}
 }
 
@@ -130,5 +135,38 @@ func TestNanoclawCatalogAndScript(t *testing.T) {
 	// One instance is the floor even for bad input.
 	if !strings.Contains(m.nanoclawDeployScript(0), "seq 1 1") {
 		t.Fatal("instance floor of 1 not applied")
+	}
+}
+
+func TestNanoclawDockerfileBuildsDist(t *testing.T) {
+	// Upstream "start" runs dist/index.js, so the image must compile the
+	// TypeScript source (pnpm install + build) before it can run.
+	for _, want := range []string{"pnpm install", "pnpm run build", `CMD ["node", "dist/index.js"]`} {
+		if !strings.Contains(nanoclawDockerfile, want) {
+			t.Fatalf("Dockerfile missing %q:\n%s", want, nanoclawDockerfile)
+		}
+	}
+}
+
+func TestNanoclawHostsTracking(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	m.agentReg = map[string]string{}
+	m.agentHosts = map[string][]string{}
+	// Deploy to two workers, then re-deploy on the first (more instances).
+	for _, h := range []string{"10.0.0.4", "10.0.0.5", "10.0.0.4"} {
+		m = drive(m, agentRegisteredMsg{agent: "Nanoclaw", host: h})
+	}
+	hosts := m.nanoclawHosts()
+	if len(hosts) != 2 || hosts[0] != "10.0.0.4" || hosts[1] != "10.0.0.5" {
+		t.Fatalf("expected both workers tracked (deduped), got %v", hosts)
+	}
+	if m.agentReg["Nanoclaw"] != "10.0.0.4" {
+		t.Fatalf("most-recent host wrong: %q", m.agentReg["Nanoclaw"])
+	}
+	// Legacy configs (single-host map only) still yield the one known host.
+	legacy := &model{agentReg: map[string]string{"Nanoclaw": "10.0.0.9"}}
+	if hosts := legacy.nanoclawHosts(); len(hosts) != 1 || hosts[0] != "10.0.0.9" {
+		t.Fatalf("legacy fallback broken: %v", hosts)
 	}
 }

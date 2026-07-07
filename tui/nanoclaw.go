@@ -19,19 +19,24 @@ import (
 const nanoclawImage = "oilsand/nanoclaw:latest"
 
 // nanoclawDockerfile builds the per-worker Nanoclaw image from the upstream
-// project. The store directory is a volume so each container instance keeps its
-// own persistent state.
+// project. Upstream is TypeScript managed with pnpm ("start" runs
+// dist/index.js), so the image must compile it — pnpm install + pnpm run build
+// — before the runtime CMD. The store directory is a volume so each container
+// instance keeps its own persistent state.
 const nanoclawDockerfile = `# Nanoclaw agent image, built by the Oilsand AI Gateway TUI.
 # Every deployed instance is a separate container from this one image.
 FROM node:22-bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+# Upstream pins pnpm via the packageManager field; corepack provides it.
+RUN corepack enable || npm install -g pnpm
 RUN git clone --depth 1 https://github.com/qwibitai/nanoclaw /opt/nanoclaw
 WORKDIR /opt/nanoclaw
-RUN npm install
+RUN pnpm install --frozen-lockfile || pnpm install
+RUN pnpm run build
 VOLUME /opt/nanoclaw/store
-CMD ["npm", "start"]
+CMD ["node", "dist/index.js"]
 `
 
 // dockerBootstrap makes Docker available on the worker (Rocky/RHEL via the
