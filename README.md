@@ -5,8 +5,10 @@ Nutanix AHV: an [Olla](https://github.com/thushan/olla) gateway/load-balancer in
 front of one or more [Ollama](https://ollama.com) worker VMs.
 
 The TUI provisions the VMs through the Prism Central v4 API, installs Olla and
-Ollama natively as systemd services, manages the pool and models, and gives you a
-streaming chat and load-balancing view over the gateway.
+Ollama natively as systemd services, manages the pool and models, deploys terminal
+AI agents (including containerized Nanoclaw instances) onto the nodes, and gives
+you a streaming chat — with session memory and web fetch — plus a load-balancing
+view over the gateway.
 
 ```text
 OpenAI-compatible clients
@@ -19,22 +21,52 @@ OpenAI-compatible clients
         +--> ...
 ```
 
-## Install (prebuilt binaries)
+## Install — one line, any OS
 
 Prebuilt binaries for Windows, Linux and macOS (amd64 + arm64) are published on the
 [GitHub Releases](https://github.com/script-repo/oilsand-ai-gateway/releases) page. Each
 archive contains `oilsand-tui` plus the bundled `scripts/` helpers, so Nutanix deploy works
-out of the box. One-line installers:
+out of the box. Pick your OS and paste one line:
+
+### Linux
 
 ```bash
-# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.sh | sh
 ```
 
+No `curl`? The installer works with `wget` too:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.sh | sh
+```
+
+### macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.sh | sh
+```
+
+Both Apple Silicon (arm64) and Intel (amd64) Macs are detected automatically.
+
+### Windows (PowerShell)
+
 ```powershell
-# Windows (PowerShell)
 irm https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.ps1 | iex
 ```
+
+### What the installer does
+
+* Detects your OS/arch, downloads the latest release archive, and installs to
+  `~/.oilsand-ai-gateway` (override with `OILSAND_INSTALL_DIR`).
+* Links `oilsand-tui` onto your `PATH` (`~/.local/bin` on Linux/macOS; override with
+  `OILSAND_BIN_DIR`). Run it afterwards with:
+
+  ```bash
+  oilsand-tui
+  ```
+
+* Pin a version with `OILSAND_VERSION=v1.2.3`, e.g.
+  `OILSAND_VERSION=v1.2.3 curl -fsSL …/install.sh | sh`.
 
 The installers also set up everything the **interactive features** need (best-effort):
 
@@ -81,7 +113,7 @@ base; pick a section, then press `Enter` to focus its content and `Esc` to come 
 
 Navigation:
 
-* `↑/↓` (or `j/k`) move through the menu; `1`–`7` jump straight to a section.
+* `↑/↓` (or `j/k`) move through the menu; `1`–`9` jump straight to a section.
 * `Enter` focus the content pane · `Esc` back to the menu.
 * `c` open the **Connect** form (gateway URL + SSH creds) · `d` disconnect · `r` refresh.
 * `/` filter any list · `?` toggle the full keybinding legend · `q`/`Ctrl+C` quit.
@@ -105,6 +137,23 @@ Sections:
 * **Chat** — a multi-line `bubbles/textarea` composer; prompts go to
   `/olla/openai/v1/chat/completions` and the reply **streams token-by-token live**, then renders as
   Glamour markdown when complete, reporting TTFT and tokens/sec.
+  * **Session memory** — every request replays the recent conversation (bounded to the last
+    24 turns / ~24k chars), so follow-up questions keep their context.
+  * **New session** — `Ctrl+N` clears the conversation and starts fresh; the status line shows
+    how many turns the current session holds.
+  * **Web fetch** — paste one or more URLs (up to 3) into a prompt and the TUI downloads each
+    page, strips it to readable text, and hands it to the model as context — basic web access
+    for otherwise-offline pool models. Fetch progress shows in the notice line.
+* **Agents** — deploy and open terminal AI agents over SSH on the managed hosts:
+  * **Crush** (gateway) — Charm's coding agent, installed on the Olla server and pointed at the
+    OpenAI endpoint so it load-balances across the whole pool.
+  * **OpenClaw** and **Hermes** (worker) — installed on a chosen worker via `ollama launch`;
+    Hermes can also set up its Telegram messaging gateway unattended (`e` to configure).
+  * **Nanoclaw** (worker) — a lightweight agent that runs as **Docker containers** on any
+    worker; deploy it multiple times (or set **Instances** > 1) to run several isolated
+    instances side-by-side on the same node. See below.
+
+  `enter`/`o` opens an agent, `d` deploys one; worker agents prompt for the target worker.
 * **Load** — load-balancing visualization: per-worker cumulative request share,
   active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
   currently taking the most load.
@@ -126,7 +175,8 @@ Sections:
   each streaming its output into the Output pane below:
   1. **Update local machine** — downloads and runs the latest installer for this OS.
   2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
-  3. **Update agents** — upgrades Crush (gateway) and re-launches OpenClaw and Hermes (workers).
+  3. **Update agents** — upgrades Crush (gateway), re-launches OpenClaw and Hermes (workers),
+     and rebuilds + restarts Nanoclaw containers where deployed.
   4. **Update image** — changes the image used for new deployments (live PC image dropdown), and
      can **seed a new image into Prism Central**: choose a built-in **preset** (Rocky Linux 9,
      Rocky Linux 10, Ubuntu 24.04) or paste any qcow2/img **URL** (with an optional name). It is
@@ -149,6 +199,38 @@ runs. Gateway URL, SSH user and password can also be supplied up front via the `
 `OLLA_SSH_USER` and `OLLA_SSH_PASSWORD` environment variables (flags/env take precedence over the
 saved values). The VM password for Nutanix deploys is entered in the **Nutanix** settings form
 (`e`) — deploys are blocked until it is set.
+
+### Nanoclaw — containerized agent instances on the workers
+
+Nanoclaw is the Agents section's containerized agent: instead of a host install, each
+deploy starts one or more **Docker containers** on the worker you pick, so any worker node
+can host it — and the same node can run **many isolated instances at once**.
+
+Deploying (press `d` on Nanoclaw in the **Agents** section):
+
+1. Pick the target worker and how many **Instances** to start (default `1`).
+2. The deploy bootstraps Docker on the worker if needed (docker-ce on Rocky/RHEL,
+   `get.docker.com` on Ubuntu/Debian) and builds the shared `oilsand/nanoclaw` image once
+   per worker (from the upstream [NanoClaw](https://github.com/qwibitai/nanoclaw) project).
+3. Each instance gets the next free auto-incremented container name (`nanoclaw-01`,
+   `nanoclaw-02`, …) and its **own named state volume** (`oilsand-nanoclaw-NN`), started
+   with `--restart unless-stopped` so instances survive reboots.
+4. Every container is pointed at the **Olla OpenAI endpoint** (via `OPENAI_BASE_URL` /
+   `NANOCLAW_MODEL` env vars), so all instances load-balance across the whole worker pool.
+
+Deploying again — to the same worker or a different one — simply adds more instances; names
+never collide. Opening Nanoclaw (`enter`/`o`) lists the worker's instances and follows the
+newest one's logs. **Update ▸ Update agents** rebuilds the image against upstream and
+restarts the containers.
+
+To manage instances by hand on the worker:
+
+```bash
+sudo docker ps --filter name=nanoclaw-            # list instances
+sudo docker logs -f nanoclaw-02                   # follow one instance
+sudo docker rm -f nanoclaw-02                     # remove an instance
+sudo docker volume rm oilsand-nanoclaw-02         # …and its state
+```
 
 ### Install Olla locally (no Nutanix VM)
 

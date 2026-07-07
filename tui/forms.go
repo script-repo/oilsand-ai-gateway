@@ -491,12 +491,22 @@ func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
 	if verb != "" {
 		verb = strings.ToUpper(verb[:1]) + verb[1:]
 	}
-	m.modal = modalAgentHost
-	m.form = huh.NewForm(huh.NewGroup(
+	fields := []huh.Field{
 		huh.NewSelect[string]().Key("agenthost").
 			Title(verb + " " + agentName + " on which worker?").
 			Options(opts...).Value(&m.fAgentHost),
-	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	}
+	// Containerized agents (Nanoclaw) can run several isolated instances on the
+	// same worker — ask how many containers to start.
+	if a, ok := agentByName(agentName); ok && a.container && act == "deploy" {
+		m.fAgentCount = "1"
+		fields = append(fields, huh.NewInput().Key("agentcount").Title("Instances").
+			Description("number of "+agentName+" containers to start on this worker (each isolated)").
+			Placeholder("1").Value(&m.fAgentCount))
+	}
+	m.modal = modalAgentHost
+	m.form = huh.NewForm(huh.NewGroup(fields...)).
+		WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
 
@@ -648,6 +658,7 @@ func (m *model) onFormComplete() tea.Cmd {
 		if !ok {
 			return nil
 		}
+		m.agentInstances = atoiOr(m.fstr("agentcount"), 1)
 		return m.startAgent(a, m.pendingAct, orDefault(m.fstr("agenthost"), m.fAgentHost))
 
 	case modalHermesCfg:

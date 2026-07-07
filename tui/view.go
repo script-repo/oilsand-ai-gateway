@@ -284,8 +284,8 @@ func (m model) viewChat() string {
 	if !m.connected {
 		return dimStyle.Render("Not connected. Press c on the Dashboard to connect first.")
 	}
-	stats := dimStyle.Render(fmt.Sprintf("TTFT %s · tok/s %s · model %s  ·  Agents tab → open in Crush",
-		msIf(m.lastTTFT), tokIf(m.lastTokS), orDefault(m.chatModel, m.defaultModel())))
+	stats := dimStyle.Render(fmt.Sprintf("TTFT %s · tok/s %s · model %s · %d turn(s) · ctrl+n new session",
+		msIf(m.lastTTFT), tokIf(m.lastTokS), orDefault(m.chatModel, m.defaultModel()), len(m.history)))
 	return lipgloss.JoinVertical(lipgloss.Left, m.chatVP.View(), stats, m.composer.View())
 }
 
@@ -300,7 +300,7 @@ func (m model) viewAgents() string {
 	}
 	loc := dimStyle.Render(fmt.Sprintf("  gateway %s · worker %s", orDefault(gw, "-"), worker))
 	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · e Telegram/gateway · r refresh hosts · / filter")
-	note := dimStyle.Render("Crush → Olla server (whole pool) · OpenClaw/Hermes → a worker's local Ollama")
+	note := dimStyle.Render("Crush → Olla server · OpenClaw/Hermes → a worker's Ollama · Nanoclaw → Docker on a worker (multi-instance)")
 
 	gwState := "off (deploy launches CLI) · e to configure"
 	if m.hermesGatewayWanted() {
@@ -510,7 +510,7 @@ func (m model) shortHelp() []key.Binding {
 	var mid []key.Binding
 	switch m.section {
 	case secChat:
-		mid = []key.Binding{m.km.Send, m.km.Back}
+		mid = []key.Binding{m.km.Send, m.km.NewSession, m.km.Back}
 	case secPool:
 		mid = []key.Binding{m.km.Add, m.km.Remove, m.km.Console, m.km.ConsoleGW, m.km.Filter, m.km.Back}
 	case secModels:
@@ -541,7 +541,7 @@ func (m model) fullHelp() [][]key.Binding {
 	}
 	access := []key.Binding{m.km.Console, m.km.ConsoleGW, m.km.AgentOpen, m.km.AgentDeploy, m.km.Token, m.km.ClearToken}
 	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.NextName}
-	global := []key.Binding{m.km.Send, m.km.Help, m.km.Quit}
+	global := []key.Binding{m.km.Send, m.km.NewSession, m.km.Help, m.km.Quit}
 	return [][]key.Binding{nav, actions, access, nutanix, global}
 }
 
@@ -550,7 +550,9 @@ func (m model) fullHelp() [][]key.Binding {
 func (m *model) renderChat() {
 	var b strings.Builder
 	if len(m.history) == 0 && m.partial == "" && !m.streaming {
-		b.WriteString(dimStyle.Render("Ask the pool anything. Responses stream token-by-token.\nEnter sends · Esc returns to the menu."))
+		b.WriteString(dimStyle.Render("Ask the pool anything. Responses stream token-by-token.\n" +
+			"The session remembers earlier turns; paste a URL and its content is fetched as context.\n" +
+			"Enter sends · Ctrl+N new session · Esc returns to the menu."))
 	}
 	for _, t := range m.history {
 		if t.role == roleUser {

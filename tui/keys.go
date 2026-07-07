@@ -39,7 +39,8 @@ type keyMap struct {
 	AgentOpen   key.Binding
 	AgentDeploy key.Binding
 
-	Send key.Binding
+	Send       key.Binding
+	NewSession key.Binding
 
 	Help key.Binding
 	Quit key.Binding
@@ -75,6 +76,7 @@ func newKeyMap() keyMap {
 		AgentOpen:   key.NewBinding(key.WithKeys("o", "enter"), key.WithHelp("o/enter", "open agent")),
 		AgentDeploy: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deploy agent")),
 		Send:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		NewSession:  key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new session")),
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}

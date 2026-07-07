@@ -13,6 +13,7 @@ type agentDef struct {
 	name       string
 	cli        string // command to (re)launch an existing install
 	deployable bool   // whether the TUI can install it
+	container  bool   // runs as Docker container(s) on the host (multi-instance)
 	target     string // "gateway" or "worker"
 	endpoint   string // how it reaches models (informational)
 	desc       string
@@ -60,6 +61,8 @@ crush
 //     its provider config is written to ~/.config/crush/crush.json.
 //   - OpenClaw and Hermes are deployed "by ollama" (ollama launch …) on a chosen
 //     worker, after git + Node + a user npm prefix are bootstrapped.
+//   - Nanoclaw runs as one or more Docker containers on a chosen worker (see
+//     nanoclaw.go), so multiple isolated instances can share the same VM.
 var agentCatalog = []agentDef{
 	{
 		name:       "Crush",
@@ -85,6 +88,15 @@ var agentCatalog = []agentDef{
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Nous Research self-improving agent",
 	},
+	{
+		name:       "Nanoclaw",
+		cli:        "nanoclaw",
+		deployable: true,
+		container:  true,
+		target:     "worker",
+		endpoint:   "Olla OpenAI endpoint (whole pool)",
+		desc:       "Lightweight agent in Docker · multi-instance",
+	},
 }
 
 // agentDeployScript returns the install bootstrap for an agent. Crush uses the
@@ -96,6 +108,10 @@ var agentCatalog = []agentDef{
 func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Crush" {
 		return crushDeployScript
+	}
+	if a.name == "Nanoclaw" {
+		// Containerized: N isolated Docker containers on the chosen worker.
+		return m.nanoclawDeployScript(maxInt(m.agentInstances, 1))
 	}
 	model := m.effDefaultModel()
 	gateway := a.name == "Hermes" && m.hermesGatewayWanted()
