@@ -166,8 +166,11 @@ type model struct {
 	vmImages  map[string]string
 	imageByID map[string]string
 
-	// agent registrations (agent name -> host it was deployed on)
+	// agent registrations: agentReg holds the most recent deploy host per agent
+	// (drives the ✓ badge / open-target), agentHosts every host it was ever
+	// deployed on (drives updates for multi-worker agents like Nanoclaw).
 	agentReg       map[string]string
+	agentHosts     map[string][]string
 	pendingAgent   string // agent awaiting host pick
 	pendingAct     string // "open" | "deploy"
 	agentInstances int    // container count for the next containerized-agent deploy
@@ -381,6 +384,7 @@ func newModel(gateway, sshUser, sshPass string) model {
 		defModel:      st.DefaultModel,
 		usageAgg:      usage30(loadUsage(usagePath(tokFile))),
 		agentReg:      st.Agents,
+		agentHosts:    st.AgentHosts,
 		hermesCfg:     st.Hermes,
 		customDeploys: customDeploys,
 		vmImages:      vmImages,
@@ -391,6 +395,15 @@ func newModel(gateway, sshUser, sshPass string) model {
 	}
 	if m.agentReg == nil {
 		m.agentReg = map[string]string{}
+	}
+	if m.agentHosts == nil {
+		m.agentHosts = map[string][]string{}
+	}
+	// Migrate configs saved before per-agent host lists existed.
+	for a, h := range m.agentReg {
+		if h != "" && len(m.agentHosts[a]) == 0 {
+			m.agentHosts[a] = []string{h}
+		}
 	}
 	if m.defModel != "" {
 		m.chatModel = m.defModel

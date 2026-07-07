@@ -212,8 +212,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.agentReg == nil {
 			m.agentReg = map[string]string{}
 		}
+		if m.agentHosts == nil {
+			m.agentHosts = map[string][]string{}
+		}
 		m.agentReg[msg.agent] = msg.host
-		_ = saveAgentReg(m.tokFile, m.agentReg)
+		if msg.host != "" && !containsStr(m.agentHosts[msg.agent], msg.host) {
+			m.agentHosts[msg.agent] = append(m.agentHosts[msg.agent], msg.host)
+		}
+		_ = saveAgentReg(m.tokFile, m.agentReg, m.agentHosts)
 		m.refreshAgents()
 		m.notice = msg.agent + " registered on " + msg.host
 		return m, nil
@@ -676,11 +682,14 @@ func (m *model) chatMessages() []ChatMessage {
 	if len(turns) > chatHistoryMaxTurns {
 		turns = turns[len(turns)-chatHistoryMaxTurns:]
 	}
+	// Walk back from the newest turn and cut before the turn that exceeds the
+	// char budget (that turn is dropped too). The latest turn always survives,
+	// even if it alone is over budget.
 	start, chars := 0, 0
-	for i := len(turns) - 1; i > 0; i-- {
+	for i := len(turns) - 1; i >= 0; i-- {
 		chars += len(turns[i].content)
-		if chars > chatHistoryMaxChars {
-			start = i
+		if chars > chatHistoryMaxChars && i < len(turns)-1 {
+			start = i + 1
 			break
 		}
 	}

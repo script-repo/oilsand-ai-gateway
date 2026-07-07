@@ -359,7 +359,8 @@ type tuiSettings struct {
 	SSHPass       string            `json:"ssh_password"` // SSH password for the gateway VM
 	Deploy        deploySettings    `json:"deploy"`
 	PC            pcOverride        `json:"prism_central"`
-	Agents        map[string]string `json:"agents"` // agent name -> deployed host
+	Agents        map[string]string   `json:"agents"`      // agent name -> most recent deployed host
+	AgentHosts    map[string][]string `json:"agent_hosts"` // agent name -> every host it was deployed on
 	Hermes        hermesSettings    `json:"hermes"`
 	CustomDeploys []customDeploy    `json:"custom_deploys"` // user-defined deployment types
 	CustomSeeded  bool              `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
@@ -534,10 +535,13 @@ func saveDefaultModel(path, model string) error {
 	return saveSettings(path, s)
 }
 
-// saveAgentReg persists agent->host registrations.
-func saveAgentReg(path string, reg map[string]string) error {
+// saveAgentReg persists agent->host registrations: the most recent host per
+// agent plus the full per-agent host list (multi-worker agents like Nanoclaw
+// are updated on every host they were ever deployed to).
+func saveAgentReg(path string, reg map[string]string, hosts map[string][]string) error {
 	s := loadSettings(path)
 	s.Agents = reg
+	s.AgentHosts = hosts
 	return saveSettings(path, s)
 }
 
