@@ -25,7 +25,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tickMsg, spinner.TickMsg, progress.FrameMsg,
 			connectedMsg, statusMsg, modelsMsg, vmsMsg,
 			chatEvMsg, pullEvMsg, procEvMsg, nextNameMsg,
-			sshResultMsg, endpointsMsg, notifyMsg, tea.WindowSizeMsg:
+			sshResultMsg, endpointsMsg, notifyMsg, tea.WindowSizeMsg,
+			hubDialedMsg, hubEvMsg, hubDeployedMsg, nanoclawInstancesMsg:
 			// handled normally below
 		default:
 			return m.updateForm(msg)
@@ -224,6 +225,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = msg.agent + " registered on " + msg.host
 		return m, nil
 
+	case hubDialedMsg:
+		if msg.gen != m.hubGen {
+			// A reconnect superseded this dial while it was in flight.
+			if msg.conn != nil {
+				msg.conn.Close()
+			}
+			return m, nil
+		}
+		m.hubBusy = false
+		if msg.err != nil {
+			m.notice = "hub connect failed: " + msg.err.Error() + " — ctrl+d deploys the hub on the gateway"
+			m.hubFeed = append(m.hubFeed, hubLine{sys: true, text: "connect failed: " + msg.err.Error()})
+			m.renderHub()
+			return m, nil
+		}
+		m.hubConn = msg.conn
+		m.hubCh = msg.ch
+		return m, waitHub(m.hubCh, m.hubGen)
+
+	case hubEvMsg:
+		if msg.gen != m.hubGen {
+			return m, nil // event from a stale connection
+		}
+		return m.handleHubEvent(msg.ev)
+
+	case hubDeployedMsg:
+		m.hubBusy = false
+		if msg.err != nil {
+			m.notice = "hub deploy failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.notice = "agent hub deployed on the gateway — connecting…"
+		return m, m.connectHub()
+
+	case nanoclawInstancesMsg:
+		m.nanoInstBusy = false
+		m.nanoInst = msg.rows
+		m.nanoInstErrs = msg.errs
+		m.nanoInstAt = time.Now()
+		if len(msg.errs) > 0 {
+			m.notice = fmt.Sprintf("nanoclaw: %d instance(s) found, %d host(s) failed", len(msg.rows), len(msg.errs))
+		} else {
+			m.notice = fmt.Sprintf("nanoclaw: %d instance(s) across %d host(s)", len(msg.rows), msg.hosts)
+		}
+		return m, nil
+
 	case notifyMsg:
 		m.notice = string(msg)
 		var cmds []tea.Cmd
@@ -312,11 +359,17 @@ func (m *model) applyLayout(w, h int) {
 	m.logVP.Width = m.contentW
 	m.logVP.Height = maxInt(m.contentH-3-vmsH-2, 3)
 
+	// Hub: header + peers + hint + 2-line input around the feed viewport.
+	m.hubTA.SetWidth(m.contentW)
+	m.hubVP.Width = m.contentW
+	m.hubVP.Height = maxInt(m.contentH-7, 3)
+
 	m.prog.Width = clampInt(m.contentW-20, 12, 56)
 	m.help.Width = w
 	m.glam = newGlamour(m.contentW)
 	m.renderChat()
 	m.renderLog()
+	m.renderHub()
 }
 
 // ---- key handling ----------------------------------------------------------
@@ -335,9 +388,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Quick section jump (unless we're typing or filtering a list).
-	if !m.isTyping() && len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+	// Quick section jump (unless we're typing or filtering a list). '0' selects
+	// the tenth section, so all sections stay reachable by number.
+	if !m.isTyping() && len(k) == 1 && (k[0] >= '1' && k[0] <= '9' || k[0] == '0') {
 		idx := int(k[0] - '1')
+		if k[0] == '0' {
+			idx = 9
+		}
 		if idx < len(sections) {
 			m.section = section(idx)
 			return m, m.enterContent()
@@ -351,7 +408,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) isTyping() bool {
-	if m.zone == zoneContent && m.section == secChat {
+	if m.zone == zoneContent && (m.section == secChat || m.section == secHub) {
 		return true
 	}
 	if l := m.activeList(); l != nil && l.FilterState() == list.Filtering {
@@ -382,15 +439,24 @@ func (m *model) activeList() *list.Model {
 func (m *model) enterContent() tea.Cmd {
 	m.zone = zoneContent
 	if m.section == secChat {
+		m.hubTA.Blur()
 		return m.composer.Focus()
 	}
+	if m.section == secHub {
+		m.composer.Blur()
+		// Dial the hub lazily on first entry so the channel is live by the
+		// time the user starts typing.
+		return tea.Batch(m.hubTA.Focus(), m.hubAutoConnect())
+	}
 	m.composer.Blur()
+	m.hubTA.Blur()
 	return nil
 }
 
 func (m *model) leaveContent() {
 	m.zone = zoneSidebar
 	m.composer.Blur()
+	m.hubTA.Blur()
 }
 
 func (m *model) disconnect() {
@@ -578,6 +644,8 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, m.deploySelectedAgent()
 		case "e":
 			return m, m.openHermesCfg()
+		case "i":
+			return m, m.fetchNanoclawInstances()
 		case "r":
 			if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
 				return m, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass)
@@ -587,6 +655,23 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		nl, cmd := m.agentsList.Update(msg)
 		m.agentsList = nl
 		return m, cmd
+
+	case secHub:
+		switch k {
+		case "esc":
+			m.leaveContent()
+			return m, nil
+		case "enter":
+			return m, m.sendHub()
+		case "ctrl+r":
+			return m, m.connectHub()
+		case "ctrl+d":
+			return m, m.deployHub()
+		default:
+			var cmd tea.Cmd
+			m.hubTA, cmd = m.hubTA.Update(msg)
+			return m, cmd
+		}
 
 	case secNutanix:
 		if m.nutanixCustom {
@@ -1175,6 +1260,26 @@ func (m *model) deploySelectedAgent() tea.Cmd {
 		return m.openAgentHostPick(a.name, "deploy")
 	}
 	return m.startAgent(a, "deploy", m.agentHost(a))
+}
+
+// fetchNanoclawInstances queries every host Nanoclaw was ever deployed to (in
+// parallel) for its container inventory, feeding the instance panel in the
+// Agents view.
+func (m *model) fetchNanoclawInstances() tea.Cmd {
+	if m.nanoInstBusy {
+		return nil
+	}
+	hosts := append([]string(nil), m.agentHosts["Nanoclaw"]...)
+	if h := m.agentReg["Nanoclaw"]; h != "" && !containsStr(hosts, h) {
+		hosts = append(hosts, h)
+	}
+	if len(hosts) == 0 {
+		m.notice = "Nanoclaw is not deployed anywhere yet — press d to deploy it on a worker"
+		return nil
+	}
+	m.nanoInstBusy = true
+	m.notice = fmt.Sprintf("listing nanoclaw instances on %d host(s)…", len(hosts))
+	return nanoclawInstancesCmd(hosts, orDefault(m.sshUser, "rocky"), m.sshPass)
 }
 
 // startAgent dispatches the open/deploy of an agent against a resolved host.

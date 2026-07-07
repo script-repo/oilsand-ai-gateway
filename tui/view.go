@@ -115,6 +115,8 @@ func (m model) sectionBody() string {
 		return m.viewChat()
 	case secAgents:
 		return m.viewAgents()
+	case secHub:
+		return m.viewHub()
 	case secLoad:
 		return m.viewLoad()
 	case secNutanix:
@@ -299,7 +301,7 @@ func (m model) viewAgents() string {
 		worker = ws[0].host
 	}
 	loc := dimStyle.Render(fmt.Sprintf("  gateway %s · worker %s", orDefault(gw, "-"), worker))
-	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · e Telegram/gateway · r refresh hosts · / filter")
+	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · i nanoclaw instances · e Telegram/gateway · r refresh hosts · / filter")
 	note := dimStyle.Render("Crush → Olla server · OpenClaw/Hermes → a worker's Ollama · Nanoclaw → Docker on a worker (multi-instance)")
 
 	gwState := "off (deploy launches CLI) · e to configure"
@@ -313,13 +315,53 @@ func (m model) viewAgents() string {
 	}
 	hermesLine := dimStyle.Render("Hermes gateway: " + gwState)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		labelStyle.Render("AI agents")+loc,
+	// The instance panel (key i) shares the vertical space with the list, so
+	// shrink the list while the panel is visible instead of clipping it.
+	inst := m.viewNanoclawInstances()
+	if inst != "" {
+		m.agentsList.SetHeight(maxInt(m.contentH-lipgloss.Height(inst)-4, 3))
+	}
+
+	rows := []string{
+		labelStyle.Render("AI agents") + loc,
 		m.agentsList.View(),
-		note,
-		hermesLine,
-		hint,
-	)
+	}
+	if inst != "" {
+		rows = append(rows, inst)
+	}
+	rows = append(rows, note, hermesLine, hint)
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// viewNanoclawInstances renders the per-host Nanoclaw container inventory
+// fetched with i; empty when nothing has been queried yet.
+func (m model) viewNanoclawInstances() string {
+	if m.nanoInstBusy {
+		return m.spin.View() + " " + warnStyle.Render("querying nanoclaw instances on all hosts…")
+	}
+	if len(m.nanoInst) == 0 && len(m.nanoInstErrs) == 0 {
+		return ""
+	}
+	head := labelStyle.Render("Nanoclaw instances") + dimStyle.Render(fmt.Sprintf(
+		"  %d instance(s) · as of %s · i refresh", len(m.nanoInst), m.nanoInstAt.Format("15:04:05")))
+	rows := []string{head}
+	for _, r := range m.nanoInst {
+		state, st := "error", badStyle
+		if strings.HasPrefix(r.status, "Up") {
+			state, st = "online", goodStyle
+		}
+		line := fmt.Sprintf("  %s %-16s %-14s %s  %s",
+			dot(state), truncate(r.host, 16), truncate(r.name, 14),
+			st.Render(truncate(r.status, 24)), dimStyle.Render(truncate(r.image, 24)))
+		rows = append(rows, truncate(line, maxInt(m.contentW, 24)))
+	}
+	if len(m.nanoInst) == 0 {
+		rows = append(rows, dimStyle.Render("  no containers found on the queried hosts"))
+	}
+	for _, e := range m.nanoInstErrs {
+		rows = append(rows, badStyle.Render("  ! ")+dimStyle.Render(truncate(e, maxInt(m.contentW-4, 10))))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 // ---- section: load ---------------------------------------------------------
@@ -516,7 +558,9 @@ func (m model) shortHelp() []key.Binding {
 	case secModels:
 		mid = []key.Binding{m.km.Pull, m.km.Browse, m.km.Remove, m.km.SetDef, m.km.SetModel, m.km.Filter, m.km.Back}
 	case secAgents:
-		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.EditCfg, m.km.Filter, m.km.Back}
+		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.Instances, m.km.EditCfg, m.km.Filter, m.km.Back}
+	case secHub:
+		mid = []key.Binding{m.km.Send, m.km.HubConnect, m.km.HubDeploy, m.km.Back}
 	case secNutanix:
 		if m.nutanixCustom {
 			mid = []key.Binding{m.km.Open, m.km.Delete, m.km.Back}
@@ -539,7 +583,7 @@ func (m model) fullHelp() [][]key.Binding {
 		m.km.Connect, m.km.Disconnect, m.km.Refresh, m.km.Add, m.km.Remove,
 		m.km.Pull, m.km.Browse, m.km.SetDef, m.km.SetModel,
 	}
-	access := []key.Binding{m.km.Console, m.km.ConsoleGW, m.km.AgentOpen, m.km.AgentDeploy, m.km.Token, m.km.ClearToken}
+	access := []key.Binding{m.km.Console, m.km.ConsoleGW, m.km.AgentOpen, m.km.AgentDeploy, m.km.Instances, m.km.HubConnect, m.km.HubDeploy, m.km.Token, m.km.ClearToken}
 	nutanix := []key.Binding{m.km.Deploy, m.km.Worker, m.km.OllaLocal, m.km.EditCfg, m.km.Delete, m.km.NextName}
 	global := []key.Binding{m.km.Send, m.km.NewSession, m.km.Help, m.km.Quit}
 	return [][]key.Binding{nav, actions, access, nutanix, global}
