@@ -35,6 +35,11 @@ RUN git clone --depth 1 https://github.com/qwibitai/nanoclaw /opt/nanoclaw
 WORKDIR /opt/nanoclaw
 RUN pnpm install --frozen-lockfile || pnpm install
 RUN pnpm run build
+# A fresh clone has no upgrade marker, and NanoClaw's upgrade tripwire refuses
+# to start without one (it assumes an unsanctioned git pull). Recording the
+# just-built version marks this image as a sanctioned install. Guarded so
+# older upstream revisions without the tripwire still build.
+RUN [ ! -f scripts/upgrade-state.ts ] || pnpm exec tsx scripts/upgrade-state.ts set
 VOLUME /opt/nanoclaw/store
 CMD ["node", "dist/index.js"]
 `
@@ -77,11 +82,15 @@ func (m *model) nanoclawDeployScript(instances int) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	b.WriteString(dockerBootstrap)
+	// The Dockerfile is (re)staged on every deploy — not just the first — so
+	// workers bootstrapped by an older TUI pick up Dockerfile fixes on the
+	// next image rebuild instead of being stuck with the copy they were born
+	// with.
 	b.WriteString(fmt.Sprintf(`NANO_IMG='%s'
+mkdir -p "$HOME/.nanoclaw"
+echo %s | base64 -d > "$HOME/.nanoclaw/Dockerfile"
 if ! sudo docker image inspect "$NANO_IMG" >/dev/null 2>&1; then
   echo "[deploy] building $NANO_IMG (first run on this worker — pulls the node base image)…"
-  mkdir -p "$HOME/.nanoclaw"
-  echo %s | base64 -d > "$HOME/.nanoclaw/Dockerfile"
   sudo docker build -t "$NANO_IMG" "$HOME/.nanoclaw"
 fi
 `, nanoclawImage, dfB64))
@@ -125,18 +134,32 @@ echo "[nanoclaw] following logs of $LATEST (ctrl+c to detach)…"
 sudo docker logs -f --tail 40 "$LATEST"
 `
 
-// nanoclawUpdateScript rebuilds the image against the latest upstream and
-// restarts the containers. Newly deployed instances pick up the fresh image.
+// nanoclawUpdateScript restages the current Dockerfile, rebuilds the image
+// against the latest upstream, and recreates the containers on it. A plain
+// `docker restart` would leave every instance on the image it was created
+// from, so each container is removed and re-run — its config env
+// (OPENAI_/ANTHROPIC_/NANOCLAW_) is carried over and its state volume
+// survives by name.
 func nanoclawUpdateScript() string {
+	dfB64 := base64.StdEncoding.EncodeToString([]byte(nanoclawDockerfile))
 	return fmt.Sprintf(`echo '[update] rebuilding nanoclaw image'
-if [ -f "$HOME/.nanoclaw/Dockerfile" ]; then
-  sudo docker build --pull --no-cache -t '%s' "$HOME/.nanoclaw" || echo '[update] rebuild failed — keeping current image'
+mkdir -p "$HOME/.nanoclaw"
+echo %s | base64 -d > "$HOME/.nanoclaw/Dockerfile"
+if sudo docker build --pull --no-cache -t '%s' "$HOME/.nanoclaw"; then
+  for c in $(sudo docker ps -a --format '{{.Names}}' | grep '^nanoclaw-' || true); do
+    echo "[update] recreating $c on the new image"
+    ENVF="$(mktemp)"
+    sudo docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+      | grep -E '^(OPENAI_|ANTHROPIC_|NANOCLAW_)' > "$ENVF" || true
+    sudo docker rm -f "$c" >/dev/null || true
+    sudo docker run -d --restart unless-stopped --name "$c" \
+      -v "oilsand-$c:/opt/nanoclaw/store" --env-file "$ENVF" '%s' >/dev/null
+    rm -f "$ENVF"
+  done
+else
+  echo '[update] rebuild failed — keeping current image and containers'
 fi
-for c in $(sudo docker ps -a --format '{{.Names}}' | grep '^nanoclaw-' || true); do
-  echo "[update] restarting $c"
-  sudo docker restart "$c" >/dev/null || true
-done
-sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'`, nanoclawImage)
+sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'`, dfB64, nanoclawImage, nanoclawImage)
 }
 
 // nanoclawOpenCmd stages the open script on the worker and returns a
