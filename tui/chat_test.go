@@ -140,11 +140,40 @@ func TestNanoclawCatalogAndScript(t *testing.T) {
 
 func TestNanoclawDockerfileBuildsDist(t *testing.T) {
 	// Upstream "start" runs dist/index.js, so the image must compile the
-	// TypeScript source (pnpm install + build) before it can run.
-	for _, want := range []string{"pnpm install", "pnpm run build", `CMD ["node", "dist/index.js"]`} {
+	// TypeScript source (pnpm install + build) before it can run. The build
+	// must also record the upgrade marker, or NanoClaw's tripwire treats the
+	// fresh clone as an unsanctioned update and refuses to start.
+	for _, want := range []string{
+		"pnpm install",
+		"pnpm run build",
+		"upgrade-state.ts set",
+		`CMD ["node", "dist/index.js"]`,
+	} {
 		if !strings.Contains(nanoclawDockerfile, want) {
 			t.Fatalf("Dockerfile missing %q:\n%s", want, nanoclawDockerfile)
 		}
+	}
+}
+
+func TestNanoclawUpdateRecreatesContainers(t *testing.T) {
+	// Updating must recreate the containers — a plain `docker restart` keeps
+	// them on the old image — while carrying over their config env and
+	// per-instance state volume.
+	script := nanoclawUpdateScript()
+	for _, want := range []string{
+		"base64 -d",        // restages the current Dockerfile before building
+		"docker rm -f",     // old container goes away…
+		"docker run -d",    // …and is recreated on the new image
+		"--env-file",       // config env carried over
+		"-v \"oilsand-$c:", // state volume survives by name
+		nanoclawImage,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("update script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "docker restart") {
+		t.Fatal("update script still restarts containers instead of recreating them")
 	}
 }
 

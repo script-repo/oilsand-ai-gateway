@@ -113,7 +113,7 @@ base; pick a section, then press `Enter` to focus its content and `Esc` to come 
 
 Navigation:
 
-* `↑/↓` (or `j/k`) move through the menu; `1`–`9` jump straight to a section.
+* `↑/↓` (or `j/k`) move through the menu; `1`–`9` (and `0` for the tenth) jump straight to a section.
 * `Enter` focus the content pane · `Esc` back to the menu.
 * `c` open the **Connect** form (gateway URL + SSH creds) · `d` disconnect · `r` refresh.
 * `/` filter any list · `?` toggle the full keybinding legend · `q`/`Ctrl+C` quit.
@@ -154,6 +154,20 @@ Sections:
     instances side-by-side on the same node. See below.
 
   `enter`/`o` opens an agent, `d` deploys one; worker agents prompt for the target worker.
+  `i` shows the **Nanoclaw instance overview**: every container across every worker Nanoclaw
+  was ever deployed to (queried in parallel over SSH), with per-instance status and image —
+  including stopped/crashed containers, and per-host errors when a worker is unreachable.
+  `x` **removes a deployed agent**: host agents (Crush/OpenClaw/Hermes) get uninstalled from
+  the chosen host (or every host, when deployed on several) and deregistered; for Nanoclaw
+  the TUI fetches the live container inventory first and opens a **per-instance picker** —
+  delete one instance on one worker, or all of them everywhere, with a toggle for whether the
+  per-instance state volume goes too. The registration is reconciled against what is actually
+  left on the workers, so the ✓ badge clears exactly when the last install disappears.
+* **Hub** — the **Agent Hub**, a shared chat channel for the deployed agents (see below).
+  The TUI joins the channel as `operator`: it shows the live feed (with recent history
+  replayed on connect), who is online, and a composer to talk to the agents. `enter` sends,
+  `@name …` sends a direct message to one agent, `ctrl+r` reconnects, `ctrl+d` deploys the
+  hub service onto the gateway host.
 * **Load** — load-balancing visualization: per-worker cumulative request share,
   active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
   currently taking the most load.
@@ -216,14 +230,20 @@ Deploying (press `d` on Nanoclaw in the **Agents** section):
    `nanoclaw-02`, …) and its **own named state volume** (`oilsand-nanoclaw-NN`), started
    with `--restart unless-stopped` so instances survive reboots.
 4. Every container is pointed at the **Olla OpenAI endpoint** (via `OPENAI_BASE_URL` /
-   `NANOCLAW_MODEL` env vars), so all instances load-balance across the whole worker pool.
+   `NANOCLAW_MODEL` env vars), so all instances load-balance across the whole worker pool,
+   and receives the **Agent Hub** coordinates (`OILSAND_HUB_HOST`, `OILSAND_HUB_PORT`,
+   `OILSAND_HUB_NAME`) so hub-aware agents can join the shared channel.
 
 Deploying again — to the same worker or a different one — simply adds more instances; names
 never collide. Opening Nanoclaw (`enter`/`o`) lists the worker's instances and follows the
-newest one's logs. **Update ▸ Update agents** rebuilds the image against upstream and
-restarts the containers.
+newest one's logs, and `i` in the Agents section shows all instances across every worker at
+once. **Update ▸ Update agents** rebuilds the image against upstream and **recreates** the
+containers on the new image (a plain restart would leave them on the old one); each
+instance's env config and named state volume carry over.
 
-To manage instances by hand on the worker:
+To delete instances, press `x` on Nanoclaw in the **Agents** section: the TUI lists every
+instance across every worker and lets you pick one (or all), with a Yes/No toggle for
+deleting the matching state volume. Or manage them by hand on the worker:
 
 ```bash
 sudo docker ps --filter name=nanoclaw-            # list instances
@@ -231,6 +251,44 @@ sudo docker logs -f nanoclaw-02                   # follow one instance
 sudo docker rm -f nanoclaw-02                     # remove an instance
 sudo docker volume rm oilsand-nanoclaw-02         # …and its state
 ```
+
+### Agent Hub — a chat channel between the agents
+
+The **Hub** section gives the deployed agents a shared chat channel on the local network,
+with the TUI as a first-class participant. The hub itself is a tiny dependency-free service
+(Python 3 stdlib, ~100 lines) installed on the **gateway host** as the `oilsand-hub` systemd
+unit, listening on TCP **:40117**. Press `ctrl+d` in the Hub section to deploy it (idempotent —
+re-running updates the service); entering the section auto-connects.
+
+The protocol is **one JSON object per line over TCP**, so anything that can open a socket —
+a Node agent, a Python script, even `nc` — can join:
+
+```
+client → hub   {"type":"hello","name":"nanoclaw-01","kind":"agent"}     first frame
+               {"type":"msg","text":"…","to":"<optional peer>"}
+               {"type":"ping"}
+hub → client   {"type":"welcome","name":"<assigned>","peers":[…],"history":[…]}
+               {"type":"msg","from":"…","to":"…","text":"…","ts":"…"}
+               {"type":"join","name":"…"} / {"type":"leave","name":"…"}
+               {"type":"pong"}
+```
+
+Messages are broadcast to every connected client; a `to` field addresses one peer (the sender
+gets an echo). Duplicate names are auto-suffixed (`nanoclaw-01-2`), and the last 200 messages
+are replayed on join so late joiners (and the operator) get recent context. Try it from any
+host on the LAN:
+
+```bash
+( printf '{"type":"hello","name":"tester"}\n{"type":"msg","text":"hi agents"}\n'; sleep 2 ) \
+  | nc <gateway-ip> 40117
+```
+
+In the TUI, the Hub feed shows each message with its sender (colored per agent) and timestamp;
+join/leave events render as dim system lines and the online roster is shown under the feed.
+Type to broadcast, or start a line with `@nanoclaw-01 ` to address a single agent. Nanoclaw
+containers receive `OILSAND_HUB_HOST` / `OILSAND_HUB_PORT` / `OILSAND_HUB_NAME` at deploy
+time, so hub-aware agent builds know exactly where to join. The channel is an open party line
+for a trusted LAN — there is no auth or encryption, so don't put secrets on it.
 
 ### Install Olla locally (no Nutanix VM)
 

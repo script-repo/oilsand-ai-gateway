@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -29,6 +30,7 @@ const (
 	secModels
 	secChat
 	secAgents
+	secHub
 	secLoad
 	secNutanix
 	secAccess
@@ -46,6 +48,7 @@ var sections = []sectionInfo{
 	{"Models", "models in the pool"},
 	{"Chat", "test the pool"},
 	{"Agents", "CLI agents via ssh"},
+	{"Hub", "agent chat channel"},
 	{"Load", "load balancing"},
 	{"Nutanix", "VMs & deploy"},
 	{"Access", "base URL & token"},
@@ -77,6 +80,7 @@ const (
 	modalOllaKey
 	modalUpdateAll
 	modalCustomDeploy
+	modalAgentRemove
 )
 
 type chatRole int
@@ -174,6 +178,27 @@ type model struct {
 	pendingAgent   string // agent awaiting host pick
 	pendingAct     string // "open" | "deploy"
 	agentInstances int    // container count for the next containerized-agent deploy
+	pendingRemove  string // containerized agent whose instance list is being fetched for the remove picker
+
+	// nanoclaw instance overview (Agents tab, key i): all containers across
+	// every worker Nanoclaw was ever deployed to.
+	nanoInst     []nanoclawInstance
+	nanoInstErrs []string
+	nanoInstBusy bool
+	nanoInstAt   time.Time
+
+	// agent hub (Hub tab): live connection to the shared agent chat channel
+	// on the gateway host. hubGen guards against events from stale dials.
+	hubConn  net.Conn
+	hubCh    chan hubEvent
+	hubGen   int
+	hubOn    bool
+	hubBusy  bool
+	hubName  string
+	hubPeers []string
+	hubFeed  []hubLine
+	hubVP    viewport.Model
+	hubTA    textarea.Model
 
 	chatVP   viewport.Model
 	logVP    viewport.Model
@@ -249,6 +274,9 @@ type model struct {
 	// agent host picker
 	fAgentHost  string
 	fAgentCount string // instances for containerized agents (Nanoclaw)
+	// agent remove picker
+	fRemoveTarget string // "host" (host agents) · "host|container" (Nanoclaw) · "all"
+	fRemoveVols   bool   // Nanoclaw: also delete the state volume(s)
 	// hermes gateway / telegram settings form values
 	fTgToken   string
 	fTgAllowed string
@@ -311,6 +339,14 @@ func newModel(gateway, sshUser, sshPass string) model {
 	ta.SetHeight(3)
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.Prompt = lipgloss.NewStyle().Foreground(colAccent).Render("┃ ")
+
+	hubTA := textarea.New()
+	hubTA.Placeholder = "Message the agents…  (@name for a direct message)"
+	hubTA.ShowLineNumbers = false
+	hubTA.CharLimit = 4000
+	hubTA.SetHeight(2)
+	hubTA.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	hubTA.Prompt = lipgloss.NewStyle().Foreground(colAccent).Render("┃ ")
 
 	prog := progress.New(progress.WithDefaultGradient(), progress.WithWidth(40))
 
@@ -376,7 +412,9 @@ func newModel(gateway, sshUser, sshPass string) model {
 		customList:    mkList("Custom deployments"),
 		chatVP:        viewport.New(80, 16),
 		logVP:         viewport.New(80, 8),
+		hubVP:         viewport.New(80, 12),
 		composer:      ta,
+		hubTA:         hubTA,
 		prevEpReq:     map[string]int{},
 		epDelta:       map[string]float64{},
 		tokFile:       tokFile,

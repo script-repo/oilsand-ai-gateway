@@ -510,6 +510,66 @@ func (m *model) openAgentHostPick(agentName, act string) tea.Cmd {
 	return m.form.Init()
 }
 
+// openAgentRemove builds the remove picker for a host-installed agent: which
+// deployment (host) to uninstall, or all of them when it lives on several.
+func (m *model) openAgentRemove(a agentDef, hosts []string) tea.Cmd {
+	m.pendingAgent = a.name
+	opts := make([]huh.Option[string], 0, len(hosts)+1)
+	for _, h := range hosts {
+		opts = append(opts, huh.NewOption(a.name+"  @ "+h, h))
+	}
+	if len(hosts) > 1 {
+		opts = append(opts, huh.NewOption(fmt.Sprintf("every host (%d)", len(hosts)), "all"))
+	}
+	m.fRemoveTarget = hosts[0]
+	m.modal = modalAgentRemove
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Remove "+a.name).
+			Description("Uninstalls the agent from the host and clears its registration. Esc cancels."),
+		huh.NewSelect[string]().Key("rmtarget").Title("Remove which install?").
+			Options(opts...).Value(&m.fRemoveTarget),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openNanoclawRemove builds the remove picker for Nanoclaw from the live
+// container inventory (fetched just before this opens): a single instance on a
+// specific worker, or every instance everywhere, plus whether to delete the
+// per-instance state volume(s).
+func (m *model) openNanoclawRemove() tea.Cmd {
+	if len(m.nanoInst) == 0 {
+		if len(m.nanoInstErrs) > 0 {
+			m.notice = "no nanoclaw instances found; some hosts were unreachable — fix SSH access and retry"
+		} else {
+			m.notice = "no nanoclaw containers left on any worker"
+		}
+		return nil
+	}
+	opts := make([]huh.Option[string], 0, len(m.nanoInst)+1)
+	for _, r := range m.nanoInst {
+		opts = append(opts, huh.NewOption(
+			fmt.Sprintf("%s  @ %s   (%s)", r.name, r.host, r.status),
+			r.host+"|"+r.name))
+	}
+	if len(m.nanoInst) > 1 {
+		opts = append(opts, huh.NewOption(fmt.Sprintf("all %d instances on every worker", len(m.nanoInst)), "all"))
+	}
+	m.pendingAgent = "Nanoclaw"
+	m.fRemoveTarget = m.nanoInst[0].host + "|" + m.nanoInst[0].name
+	m.fRemoveVols = true
+	m.modal = modalAgentRemove
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Remove Nanoclaw instance(s)").
+			Description("Deletes the selected container(s). Esc cancels."),
+		huh.NewSelect[string]().Key("rmtarget").Title("Which instance?").
+			Options(opts...).Value(&m.fRemoveTarget),
+		huh.NewConfirm().Key("rmvols").Title("Also delete the state volume(s)?").
+			Description("oilsand-<name> — No keeps the state for a future instance with the same name").
+			Affirmative("Yes").Negative("No").Value(&m.fRemoveVols),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
 // fstr reads a form field's value by key and trims it. Reading via the form
 // (rather than the Value(&…)-bound model field) is immune to Bubble Tea's
 // per-update model copying, which otherwise drops the user's typed edits.
@@ -660,6 +720,42 @@ func (m *model) onFormComplete() tea.Cmd {
 		}
 		m.agentInstances = atoiOr(m.fstr("agentcount"), 1)
 		return m.startAgent(a, m.pendingAct, orDefault(m.fstr("agenthost"), m.fAgentHost))
+
+	case modalAgentRemove:
+		a, ok := agentByName(m.pendingAgent)
+		if !ok {
+			return nil
+		}
+		target := orDefault(m.fstr("rmtarget"), m.fRemoveTarget)
+		user := orDefault(m.sshUser, "rocky")
+		if a.container {
+			vols := m.fRemoveVols
+			if m.form != nil {
+				vols = m.form.GetBool("rmvols")
+			}
+			var targets []nanoclawInstance
+			if target == "all" {
+				targets = append(targets, m.nanoInst...)
+			} else if host, name, ok := strings.Cut(target, "|"); ok && host != "" && name != "" {
+				targets = append(targets, nanoclawInstance{host: host, name: name})
+			}
+			if len(targets) == 0 {
+				m.notice = "nothing selected to remove"
+				return nil
+			}
+			m.notice = fmt.Sprintf("removing %d nanoclaw instance(s)…", len(targets))
+			return nanoclawRemoveCmd(targets, vols, user, m.sshPass)
+		}
+		hosts := m.agentDeployedHosts(a.name)
+		if target != "all" {
+			hosts = []string{target}
+		}
+		if len(hosts) == 0 {
+			m.notice = "nothing selected to remove"
+			return nil
+		}
+		m.notice = fmt.Sprintf("uninstalling %s on %d host(s)…", a.name, len(hosts))
+		return agentUninstallCmd(a, hosts, user, m.sshPass)
 
 	case modalHermesCfg:
 		enable := m.fGwEnable

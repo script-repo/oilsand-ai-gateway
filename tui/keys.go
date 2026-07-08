@@ -38,6 +38,10 @@ type keyMap struct {
 
 	AgentOpen   key.Binding
 	AgentDeploy key.Binding
+	Instances   key.Binding
+
+	HubConnect key.Binding
+	HubDeploy  key.Binding
 
 	Send       key.Binding
 	NewSession key.Binding
@@ -75,6 +79,9 @@ func newKeyMap() keyMap {
 		ClearToken:  key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "clear token")),
 		AgentOpen:   key.NewBinding(key.WithKeys("o", "enter"), key.WithHelp("o/enter", "open agent")),
 		AgentDeploy: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "deploy agent")),
+		Instances:   key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "nanoclaw instances")),
+		HubConnect:  key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "reconnect hub")),
+		HubDeploy:   key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "deploy hub")),
 		Send:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		NewSession:  key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new session")),
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
