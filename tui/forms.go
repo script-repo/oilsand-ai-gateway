@@ -570,6 +570,45 @@ func (m *model) openNanoclawRemove() tea.Cmd {
 	return m.form.Init()
 }
 
+// openNanoclawConnect builds the connect picker for Nanoclaw from the live
+// container inventory (fetched just before this opens): which running instance
+// to open an interactive ncl session in. Stopped/crashed containers are omitted
+// because ncl can only attach to a live one.
+func (m *model) openNanoclawConnect() tea.Cmd {
+	var running []nanoclawInstance
+	for _, r := range m.nanoInst {
+		if strings.HasPrefix(r.status, "Up") {
+			running = append(running, r)
+		}
+	}
+	if len(running) == 0 {
+		switch {
+		case len(m.nanoInst) > 0:
+			m.notice = "no running nanoclaw instances to connect to — all are stopped (i shows status, d deploys more)"
+		case len(m.nanoInstErrs) > 0:
+			m.notice = "no nanoclaw instances found; some hosts were unreachable — fix SSH access and retry"
+		default:
+			m.notice = "no nanoclaw containers on any worker — press d to deploy one"
+		}
+		return nil
+	}
+	opts := make([]huh.Option[string], 0, len(running))
+	for _, r := range running {
+		opts = append(opts, huh.NewOption(
+			fmt.Sprintf("%s  @ %s   (%s)", r.name, r.host, r.status),
+			r.host+"|"+r.name))
+	}
+	m.fConnectTarget = running[0].host + "|" + running[0].name
+	m.modal = modalNanoConnect
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewNote().Title("Connect to a Nanoclaw instance").
+			Description("Opens an interactive ncl session inside the container (ctrl+d / exit to leave). Esc cancels."),
+		huh.NewSelect[string]().Key("conntarget").Title("Which instance?").
+			Options(opts...).Value(&m.fConnectTarget),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
 // fstr reads a form field's value by key and trims it. Reading via the form
 // (rather than the Value(&…)-bound model field) is immune to Bubble Tea's
 // per-update model copying, which otherwise drops the user's typed edits.
@@ -756,6 +795,19 @@ func (m *model) onFormComplete() tea.Cmd {
 		}
 		m.notice = fmt.Sprintf("uninstalling %s on %d host(s)…", a.name, len(hosts))
 		return agentUninstallCmd(a, hosts, user, m.sshPass)
+
+	case modalNanoConnect:
+		target := orDefault(m.fstr("conntarget"), m.fConnectTarget)
+		host, name, ok := strings.Cut(target, "|")
+		if !ok || host == "" || name == "" {
+			m.notice = "no instance selected to connect to"
+			return nil
+		}
+		m.notice = fmt.Sprintf("connecting to %s on %s…", name, host)
+		if isLocalHost(host) {
+			return localNanoclawConnectCmd(name)
+		}
+		return nanoclawConnectCmd(m.sshUser, host, m.sshPass, name)
 
 	case modalHermesCfg:
 		enable := m.fGwEnable

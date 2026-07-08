@@ -524,6 +524,7 @@ func (m model) viewModal() string {
 		modalUpdateAll:    "Update everything",
 		modalCustomDeploy: "Add custom deployment",
 		modalAgentRemove:  "Remove agent",
+		modalNanoConnect:  "Connect to Nanoclaw instance",
 	}
 	inner := modalTitle.Render(titles[m.modal]) + "\n\n" + m.form.View()
 	box := modalBox.Render(inner)

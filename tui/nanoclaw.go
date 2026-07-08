@@ -183,22 +183,16 @@ echo "[deploy] started:$started — each instance is isolated in its own contain
 	return b.String()
 }
 
-// nanoclawOpenScript lists the worker's Nanoclaw containers and follows the
-// logs of the most recent running instance (Nanoclaw runs as a service, so logs
-// are its interactive surface).
-const nanoclawOpenScript = `echo "[nanoclaw] instances on this worker:"
-sudo docker ps -a --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || {
-  echo "[nanoclaw] docker is not installed here — deploy Nanoclaw first (d in the Agents tab)."
-  exit 0
+// nanoclawConnectRemoteCmd is the shell that opens an interactive ncl session
+// inside a specific Nanoclaw container. NanoClaw ships an `ncl` CLI client
+// (package.json bin/scripts → `tsx src/cli/client.ts`) that talks to the
+// in-container control socket (/opt/nanoclaw/data/ncl.sock); running it with a
+// TTY (docker exec -it) gives the same interactive surface Hermes/OpenClaw have,
+// rather than just tailing logs. WORKDIR is already /opt/nanoclaw but we set it
+// explicitly so `pnpm exec` resolves the project regardless of image quirks.
+func nanoclawConnectRemoteCmd(name string) string {
+	return "sudo docker exec -it -w /opt/nanoclaw '" + shSingle(name) + "' pnpm exec tsx src/cli/client.ts"
 }
-LATEST="$(sudo docker ps --filter name=nanoclaw- --format '{{.Names}}' | sort | tail -n 1)"
-if [ -z "$LATEST" ]; then
-  echo "[nanoclaw] no running instances — deploy one from the Agents tab (d)."
-  exit 0
-fi
-echo "[nanoclaw] following logs of $LATEST (ctrl+c to detach)…"
-sudo docker logs -f --tail 40 "$LATEST"
-`
 
 // nanoclawRecreateFragment recreates every existing nanoclaw container on the
 // just-built "$NANO_IMG" image. A plain `docker restart` would leave every
@@ -239,9 +233,11 @@ fi
 sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'`, nanoclawImage, dfB64, nanoclawDockerfileLabel)
 }
 
-// nanoclawOpenCmd stages the open script on the worker and returns a
-// consoleReadyMsg that runs it interactively (no registration on exit).
-func nanoclawOpenCmd(user, host, pass string) tea.Cmd {
+// nanoclawConnectCmd opens an interactive ncl session inside a named container
+// on a worker over SSH. It returns a consoleReadyMsg carrying a `docker exec
+// -it` command; the console runner allocates a PTY (ssh -t), so the client's
+// interactive UI renders. No registration on exit (the instance already exists).
+func nanoclawConnectCmd(user, host, pass, name string) tea.Cmd {
 	return func() tea.Msg {
 		u := orDefault(user, "rocky")
 		if host == "" {
@@ -250,22 +246,14 @@ func nanoclawOpenCmd(user, host, pass string) tea.Cmd {
 		if pass != "" {
 			_, _ = EnsureKeyAuth(host, u, pass)
 		}
-		const remotePath = "~/.oilsand-nanoclaw-open.sh"
-		if err := uploadRemoteScript(host, u, pass, remotePath, nanoclawOpenScript); err != nil {
-			return notifyMsg("Nanoclaw open prep failed: " + err.Error())
-		}
-		return consoleReadyMsg{user: u, host: host, key: managedKeyPath(), cmd: "bash -l " + remotePath, label: "Nanoclaw"}
+		return consoleReadyMsg{user: u, host: host, key: managedKeyPath(), cmd: nanoclawConnectRemoteCmd(name), label: "Nanoclaw " + name}
 	}
 }
 
-// localNanoclawOpenCmd is nanoclawOpenCmd for a worker that is this machine.
-func localNanoclawOpenCmd() tea.Cmd {
+// localNanoclawConnectCmd is nanoclawConnectCmd for a container on this machine.
+func localNanoclawConnectCmd(name string) tea.Cmd {
 	return func() tea.Msg {
-		abs, err := localWriteScript("~/.oilsand-nanoclaw-open.sh", nanoclawOpenScript)
-		if err != nil {
-			return notifyMsg("Nanoclaw open prep failed: " + err.Error())
-		}
-		return consoleReadyMsg{local: true, cmd: "bash -l " + abs, label: "Nanoclaw"}
+		return consoleReadyMsg{local: true, cmd: nanoclawConnectRemoteCmd(name), label: "Nanoclaw " + name}
 	}
 }
 

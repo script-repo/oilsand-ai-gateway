@@ -103,6 +103,57 @@ func TestRemoveNanoclawOpensInstancePicker(t *testing.T) {
 	}
 }
 
+func TestNanoclawConnectRemoteCmd(t *testing.T) {
+	got := nanoclawConnectRemoteCmd("nanoclaw-03")
+	for _, want := range []string{"docker exec -it", "'nanoclaw-03'", "tsx src/cli/client.ts"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("connect cmd missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestOpenNanoclawOpensConnectPicker(t *testing.T) {
+	m := removeModel(t, "10.0.0.4", "10.0.0.5")
+	m.section = secAgents
+	m.zone = zoneContent
+	selectAgent(t, &m, "Nanoclaw")
+
+	// o/enter kicks off the instance fetch with the connect intent recorded
+	// (rather than tailing the newest container's logs).
+	next, _ := m.handleContentKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}}, "o")
+	m = next.(model)
+	if !m.pendingConnect || !m.nanoInstBusy {
+		t.Fatalf("open did not start instance fetch: pendingConnect=%v busy=%v", m.pendingConnect, m.nanoInstBusy)
+	}
+
+	// The inventory arriving opens the per-instance connect picker; only running
+	// instances are offered.
+	rows := []nanoclawInstance{
+		{host: "10.0.0.4", name: "nanoclaw-01", status: "Up 2 hours", image: nanoclawImage},
+		{host: "10.0.0.5", name: "nanoclaw-02", status: "Exited (1) 3 minutes ago", image: nanoclawImage},
+	}
+	m = drive(m, nanoclawInstancesMsg{rows: rows, hosts: 2, okHosts: []string{"10.0.0.4", "10.0.0.5"}})
+	if m.pendingConnect {
+		t.Fatal("pendingConnect not cleared")
+	}
+	if m.form == nil || m.modal != modalNanoConnect {
+		t.Fatalf("connect picker not opened: modal=%v", m.modal)
+	}
+	// The stopped container must default off; the running one is preselected.
+	if m.fConnectTarget != "10.0.0.4|nanoclaw-01" {
+		t.Fatalf("running instance not preselected: %q", m.fConnectTarget)
+	}
+
+	// Completing the picker (form-nil fallback path) dispatches the connection.
+	m.form = nil
+	if cmd := m.onFormComplete(); cmd == nil {
+		t.Fatal("connect picker completion produced no command")
+	}
+	if !strings.Contains(m.notice, "connecting to nanoclaw-01") {
+		t.Fatalf("unexpected notice: %q", m.notice)
+	}
+}
+
 func TestReconcileNanoclawHosts(t *testing.T) {
 	m := removeModel(t, "10.0.0.4", "10.0.0.5")
 

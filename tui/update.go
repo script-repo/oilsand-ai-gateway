@@ -274,6 +274,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingRemove = ""
 			return m, m.openNanoclawRemove()
 		}
+		if m.pendingConnect {
+			// This fetch was the first half of an open: offer the connect picker
+			// now that the instance list is fresh.
+			m.pendingConnect = false
+			return m, m.openNanoclawConnect()
+		}
 		if len(msg.errs) > 0 {
 			m.notice = fmt.Sprintf("nanoclaw: %d instance(s) found, %d host(s) failed", len(msg.rows), len(msg.errs))
 		} else {
@@ -1277,6 +1283,21 @@ func (m *model) openSelectedAgent() tea.Cmd {
 		return nil
 	}
 	a, _ := agentByName(it.name)
+	if a.container {
+		// Nanoclaw is many isolated containers: refresh the live inventory, then
+		// let the user pick which instance to open an interactive ncl session in
+		// (rather than launching a single CLI on a host).
+		if len(m.agentDeployedHosts(a.name)) == 0 {
+			m.notice = a.name + " is not deployed anywhere yet — press d to deploy it on a worker"
+			return nil
+		}
+		if m.nanoInstBusy {
+			m.notice = "already querying nanoclaw instances — try again in a moment"
+			return nil
+		}
+		m.pendingConnect = true
+		return m.fetchNanoclawInstances()
+	}
 	if a.target == "worker" {
 		if h, reg := m.agentReg[a.name]; reg && h != "" {
 			return m.startAgent(a, "open", h)
@@ -1438,14 +1459,8 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		return deployAgentCmd(m.sshUser, host, m.sshPass, script, a.name, a.name+" deploy")
 	}
 	m.notice = fmt.Sprintf("opening %s on %s…", a.name, host)
-	if a.name == "Nanoclaw" {
-		// Nanoclaw runs as container(s): open lists the instances and follows
-		// the newest one's logs instead of launching a CLI.
-		if local {
-			return localNanoclawOpenCmd()
-		}
-		return nanoclawOpenCmd(m.sshUser, host, m.sshPass)
-	}
+	// Nanoclaw runs as multiple containers, so opening it is instance-scoped and
+	// handled by openSelectedAgent (fetch inventory → connect picker), never here.
 	if local {
 		if a.name == "Crush" {
 			return localCrushCmd(m.crushConfigJSON(), "", a.name, "")

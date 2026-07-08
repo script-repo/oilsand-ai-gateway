@@ -239,9 +239,13 @@ Deploying (press `d` on Nanoclaw in the **Agents** section):
    `OILSAND_HUB_NAME`) so hub-aware agents can join the shared channel.
 
 Deploying again — to the same worker or a different one — simply adds more instances; names
-never collide. Opening Nanoclaw (`enter`/`o`) lists the worker's instances and follows the
-newest one's logs, and `i` in the Agents section shows all instances across every worker at
-once. **Update ▸ Update agents** rebuilds the image against upstream and **recreates** the
+never collide. Opening Nanoclaw (`enter`/`o`) refreshes the live inventory and lets you pick
+a **running instance** to drop into: it opens an interactive `ncl` session **inside that
+container** (`docker exec -it … tsx src/cli/client.ts`, which talks to NanoClaw's in-container
+control socket), the same interactive surface Hermes and OpenClaw give — not just a log tail.
+`i` in the Agents section shows all instances across every worker at once (including stopped
+ones), and remains the place to check status or read logs by hand (`sudo docker logs …`).
+**Update ▸ Update agents** rebuilds the image against upstream and **recreates** the
 containers on the new image (a plain restart would leave them on the old one); each
 instance's env config and named state volume carry over.
 
@@ -252,6 +256,7 @@ deleting the matching state volume. Or manage them by hand on the worker:
 ```bash
 sudo docker ps --filter name=nanoclaw-            # list instances
 sudo docker logs -f nanoclaw-02                   # follow one instance
+sudo docker exec -it nanoclaw-02 pnpm exec tsx src/cli/client.ts   # interactive ncl session
 sudo docker rm -f nanoclaw-02                     # remove an instance
 sudo docker volume rm oilsand-nanoclaw-02         # …and its state
 ```
