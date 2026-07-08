@@ -301,7 +301,7 @@ func (m model) viewAgents() string {
 		worker = ws[0].host
 	}
 	loc := dimStyle.Render(fmt.Sprintf("  gateway %s · worker %s", orDefault(gw, "-"), worker))
-	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · i nanoclaw instances · e Telegram/gateway · r refresh hosts · / filter")
+	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · x remove · i nanoclaw instances · e Telegram/gateway · r refresh · / filter")
 	note := dimStyle.Render("Crush → Olla server · OpenClaw/Hermes → a worker's Ollama · Nanoclaw → Docker on a worker (multi-instance)")
 
 	gwState := "off (deploy launches CLI) · e to configure"
@@ -523,6 +523,7 @@ func (m model) viewModal() string {
 		modalOllaKey:      "Update Ollama cloud keys",
 		modalUpdateAll:    "Update everything",
 		modalCustomDeploy: "Add custom deployment",
+		modalAgentRemove:  "Remove agent",
 	}
 	inner := modalTitle.Render(titles[m.modal]) + "\n\n" + m.form.View()
 	box := modalBox.Render(inner)
@@ -558,7 +559,7 @@ func (m model) shortHelp() []key.Binding {
 	case secModels:
 		mid = []key.Binding{m.km.Pull, m.km.Browse, m.km.Remove, m.km.SetDef, m.km.SetModel, m.km.Filter, m.km.Back}
 	case secAgents:
-		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.Instances, m.km.EditCfg, m.km.Filter, m.km.Back}
+		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.Remove, m.km.Instances, m.km.EditCfg, m.km.Filter, m.km.Back}
 	case secHub:
 		mid = []key.Binding{m.km.Send, m.km.HubConnect, m.km.HubDeploy, m.km.Back}
 	case secNutanix:

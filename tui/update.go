@@ -26,7 +26,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			connectedMsg, statusMsg, modelsMsg, vmsMsg,
 			chatEvMsg, pullEvMsg, procEvMsg, nextNameMsg,
 			sshResultMsg, endpointsMsg, notifyMsg, tea.WindowSizeMsg,
-			hubDialedMsg, hubEvMsg, hubDeployedMsg, nanoclawInstancesMsg:
+			hubDialedMsg, hubEvMsg, hubDeployedMsg, nanoclawInstancesMsg,
+			agentRemovedMsg:
 			// handled normally below
 		default:
 			return m.updateForm(msg)
@@ -264,10 +265,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.nanoInst = msg.rows
 		m.nanoInstErrs = msg.errs
 		m.nanoInstAt = time.Now()
+		// The inventory is ground truth: hosts that answered with zero
+		// containers are no longer deployments, so drop them from the registry.
+		m.reconcileNanoclawHosts(msg)
+		if m.pendingRemove != "" {
+			// This fetch was the first half of a remove: open the picker now
+			// that the instance list is fresh.
+			m.pendingRemove = ""
+			return m, m.openNanoclawRemove()
+		}
 		if len(msg.errs) > 0 {
 			m.notice = fmt.Sprintf("nanoclaw: %d instance(s) found, %d host(s) failed", len(msg.rows), len(msg.errs))
 		} else {
 			m.notice = fmt.Sprintf("nanoclaw: %d instance(s) across %d host(s)", len(msg.rows), msg.hosts)
+		}
+		return m, nil
+
+	case agentRemovedMsg:
+		if msg.container {
+			// Refresh the inventory; its handler reconciles the registration
+			// against what is actually left on the workers.
+			notice := fmt.Sprintf("removed %d nanoclaw instance(s)", msg.removed)
+			if len(msg.errs) > 0 {
+				notice += " — failed: " + strings.Join(msg.errs, "; ")
+			}
+			m.notice = notice
+			return m, m.fetchNanoclawInstances()
+		}
+		if len(msg.okHosts) > 0 {
+			var kept []string
+			for _, h := range m.agentHosts[msg.agent] {
+				if !containsStr(msg.okHosts, h) {
+					kept = append(kept, h)
+				}
+			}
+			if len(kept) == 0 {
+				delete(m.agentHosts, msg.agent)
+				delete(m.agentReg, msg.agent)
+			} else {
+				m.agentHosts[msg.agent] = kept
+				if !containsStr(kept, m.agentReg[msg.agent]) {
+					m.agentReg[msg.agent] = kept[0]
+				}
+			}
+			_ = saveAgentReg(m.tokFile, m.agentReg, m.agentHosts)
+			m.refreshAgents()
+		}
+		if len(msg.errs) > 0 {
+			m.notice = fmt.Sprintf("%s removed on %d host(s) — failed: %s", msg.agent, msg.removed, strings.Join(msg.errs, "; "))
+		} else {
+			m.notice = fmt.Sprintf("%s removed on %d host(s)", msg.agent, msg.removed)
 		}
 		return m, nil
 
@@ -646,6 +693,8 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, m.openHermesCfg()
 		case "i":
 			return m, m.fetchNanoclawInstances()
+		case "x", "delete":
+			return m, m.removeSelectedAgent()
 		case "r":
 			if h := hostFromURL(m.gateway); h != "" && m.sshPass != "" {
 				return m, endpointsCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass)
@@ -1262,6 +1311,15 @@ func (m *model) deploySelectedAgent() tea.Cmd {
 	return m.startAgent(a, "deploy", m.agentHost(a))
 }
 
+// agentDeployedHosts returns every host an agent is registered as deployed on.
+func (m *model) agentDeployedHosts(name string) []string {
+	hosts := append([]string(nil), m.agentHosts[name]...)
+	if h := m.agentReg[name]; h != "" && !containsStr(hosts, h) {
+		hosts = append(hosts, h)
+	}
+	return hosts
+}
+
 // fetchNanoclawInstances queries every host Nanoclaw was ever deployed to (in
 // parallel) for its container inventory, feeding the instance panel in the
 // Agents view.
@@ -1269,10 +1327,7 @@ func (m *model) fetchNanoclawInstances() tea.Cmd {
 	if m.nanoInstBusy {
 		return nil
 	}
-	hosts := append([]string(nil), m.agentHosts["Nanoclaw"]...)
-	if h := m.agentReg["Nanoclaw"]; h != "" && !containsStr(hosts, h) {
-		hosts = append(hosts, h)
-	}
+	hosts := m.agentDeployedHosts("Nanoclaw")
 	if len(hosts) == 0 {
 		m.notice = "Nanoclaw is not deployed anywhere yet — press d to deploy it on a worker"
 		return nil
@@ -1280,6 +1335,71 @@ func (m *model) fetchNanoclawInstances() tea.Cmd {
 	m.nanoInstBusy = true
 	m.notice = fmt.Sprintf("listing nanoclaw instances on %d host(s)…", len(hosts))
 	return nanoclawInstancesCmd(hosts, orDefault(m.sshUser, "rocky"), m.sshPass)
+}
+
+// removeSelectedAgent starts deleting a deployed agent. Host agents pick the
+// install (host) to uninstall; Nanoclaw first refreshes its live container
+// inventory, then offers a per-instance picker.
+func (m *model) removeSelectedAgent() tea.Cmd {
+	it, ok := m.agentsList.SelectedItem().(agentItem)
+	if !ok {
+		m.notice = "select an agent to remove"
+		return nil
+	}
+	a, ok := agentByName(it.name)
+	if !ok {
+		return nil
+	}
+	hosts := m.agentDeployedHosts(a.name)
+	if len(hosts) == 0 {
+		m.notice = a.name + " is not registered as deployed — nothing to remove"
+		return nil
+	}
+	if a.container {
+		if m.nanoInstBusy {
+			m.notice = "already querying nanoclaw instances — try again in a moment"
+			return nil
+		}
+		m.pendingRemove = a.name
+		return m.fetchNanoclawInstances()
+	}
+	return m.openAgentRemove(a, hosts)
+}
+
+// reconcileNanoclawHosts prunes the Nanoclaw deployment registry using a fresh
+// instance inventory: any host that answered the query but has no containers
+// left is dropped (unreachable hosts are kept — their state is unknown).
+func (m *model) reconcileNanoclawHosts(msg nanoclawInstancesMsg) {
+	if len(msg.okHosts) == 0 {
+		return
+	}
+	hasInst := map[string]bool{}
+	for _, r := range msg.rows {
+		hasInst[r.host] = true
+	}
+	var kept []string
+	changed := false
+	for _, h := range m.agentDeployedHosts("Nanoclaw") {
+		if containsStr(msg.okHosts, h) && !hasInst[h] {
+			changed = true
+			continue
+		}
+		kept = append(kept, h)
+	}
+	if !changed {
+		return
+	}
+	if len(kept) == 0 {
+		delete(m.agentHosts, "Nanoclaw")
+		delete(m.agentReg, "Nanoclaw")
+	} else {
+		m.agentHosts["Nanoclaw"] = kept
+		if !containsStr(kept, m.agentReg["Nanoclaw"]) {
+			m.agentReg["Nanoclaw"] = kept[0]
+		}
+	}
+	_ = saveAgentReg(m.tokFile, m.agentReg, m.agentHosts)
+	m.refreshAgents()
 }
 
 // startAgent dispatches the open/deploy of an agent against a resolved host.

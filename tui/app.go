@@ -80,6 +80,7 @@ const (
 	modalOllaKey
 	modalUpdateAll
 	modalCustomDeploy
+	modalAgentRemove
 )
 
 type chatRole int
@@ -177,6 +178,7 @@ type model struct {
 	pendingAgent   string // agent awaiting host pick
 	pendingAct     string // "open" | "deploy"
 	agentInstances int    // container count for the next containerized-agent deploy
+	pendingRemove  string // containerized agent whose instance list is being fetched for the remove picker
 
 	// nanoclaw instance overview (Agents tab, key i): all containers across
 	// every worker Nanoclaw was ever deployed to.
@@ -272,6 +274,9 @@ type model struct {
 	// agent host picker
 	fAgentHost  string
 	fAgentCount string // instances for containerized agents (Nanoclaw)
+	// agent remove picker
+	fRemoveTarget string // "host" (host agents) · "host|container" (Nanoclaw) · "all"
+	fRemoveVols   bool   // Nanoclaw: also delete the state volume(s)
 	// hermes gateway / telegram settings form values
 	fTgToken   string
 	fTgAllowed string

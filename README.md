@@ -157,6 +157,12 @@ Sections:
   `i` shows the **Nanoclaw instance overview**: every container across every worker Nanoclaw
   was ever deployed to (queried in parallel over SSH), with per-instance status and image —
   including stopped/crashed containers, and per-host errors when a worker is unreachable.
+  `x` **removes a deployed agent**: host agents (Crush/OpenClaw/Hermes) get uninstalled from
+  the chosen host (or every host, when deployed on several) and deregistered; for Nanoclaw
+  the TUI fetches the live container inventory first and opens a **per-instance picker** —
+  delete one instance on one worker, or all of them everywhere, with a toggle for whether the
+  per-instance state volume goes too. The registration is reconciled against what is actually
+  left on the workers, so the ✓ badge clears exactly when the last install disappears.
 * **Hub** — the **Agent Hub**, a shared chat channel for the deployed agents (see below).
   The TUI joins the channel as `operator`: it shows the live feed (with recent history
   replayed on connect), who is online, and a composer to talk to the agents. `enter` sends,
@@ -235,7 +241,9 @@ once. **Update ▸ Update agents** rebuilds the image against upstream and **rec
 containers on the new image (a plain restart would leave them on the old one); each
 instance's env config and named state volume carry over.
 
-To manage instances by hand on the worker:
+To delete instances, press `x` on Nanoclaw in the **Agents** section: the TUI lists every
+instance across every worker and lets you pick one (or all), with a Yes/No toggle for
+deleting the matching state volume. Or manage them by hand on the worker:
 
 ```bash
 sudo docker ps --filter name=nanoclaw-            # list instances

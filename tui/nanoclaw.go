@@ -213,9 +213,10 @@ type nanoclawInstance struct {
 }
 
 type nanoclawInstancesMsg struct {
-	rows  []nanoclawInstance
-	errs  []string
-	hosts int
+	rows    []nanoclawInstance
+	errs    []string
+	hosts   int
+	okHosts []string // hosts that answered (even with zero instances)
 }
 
 // nanoclawInstancesCmd queries every known Nanoclaw host in parallel and
@@ -237,6 +238,7 @@ func nanoclawInstancesCmd(hosts []string, user, pass string) tea.Cmd {
 					msg.errs = append(msg.errs, h+": "+err.Error())
 					return
 				}
+				msg.okHosts = append(msg.okHosts, h)
 				msg.rows = append(msg.rows, parseNanoclawPS(h, out)...)
 			}(h)
 		}
@@ -248,6 +250,7 @@ func nanoclawInstancesCmd(hosts []string, user, pass string) tea.Cmd {
 			return msg.rows[i].name < msg.rows[j].name
 		})
 		sort.Strings(msg.errs)
+		sort.Strings(msg.okHosts)
 		return msg
 	}
 }
@@ -275,6 +278,71 @@ func runNanoclawPS(host, user, pass string) (string, error) {
 		return "", fmt.Errorf("%v: %s", err, lastNonEmptyLine(out))
 	}
 	return out, nil
+}
+
+// nanoclawRemoveScript deletes the named containers on one host, optionally
+// with their per-instance state volumes. Volume removal is best-effort (a
+// volume may never have been created); container removal errors surface.
+func nanoclawRemoveScript(names []string, volumes bool) string {
+	var b strings.Builder
+	for _, n := range names {
+		fmt.Fprintf(&b, "sudo docker rm -f '%s'\n", shSingle(n))
+		if volumes {
+			fmt.Fprintf(&b, "sudo docker volume rm 'oilsand-%s' >/dev/null 2>&1 || true\n", shSingle(n))
+		}
+	}
+	return b.String()
+}
+
+// nanoclawRemoveCmd deletes the chosen instances (grouped per host, hosts in
+// parallel) and reports the outcome; the caller refreshes the inventory, which
+// also reconciles the deployment registration against what is actually left.
+func nanoclawRemoveCmd(targets []nanoclawInstance, volumes bool, user, pass string) tea.Cmd {
+	byHost := map[string][]string{}
+	for _, t := range targets {
+		byHost[t.host] = append(byHost[t.host], t.name)
+	}
+	return func() tea.Msg {
+		msg := agentRemovedMsg{agent: "Nanoclaw", container: true}
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for h, names := range byHost {
+			wg.Add(1)
+			go func(h string, names []string) {
+				defer wg.Done()
+				script := nanoclawRemoveScript(names, volumes)
+				var out string
+				var err error
+				switch {
+				case isLocalHost(h):
+					b, e := exec.Command("bash", "-lc", script).CombinedOutput()
+					out, err = string(b), e
+				case pass == "":
+					err = fmt.Errorf("no SSH password configured")
+				default:
+					client, e := dialSSH(h, user, pass)
+					if e != nil {
+						err = e
+					} else {
+						out, err = runSSH(client, script)
+						client.Close()
+					}
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					msg.errs = append(msg.errs, h+": "+strings.TrimSpace(err.Error()+" "+lastNonEmptyLine(out)))
+					return
+				}
+				msg.removed += len(names)
+				msg.okHosts = append(msg.okHosts, h)
+			}(h, names)
+		}
+		wg.Wait()
+		sort.Strings(msg.okHosts)
+		sort.Strings(msg.errs)
+		return msg
+	}
 }
 
 // parseNanoclawPS turns `docker ps` tab-separated output into instances,

@@ -4,7 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"sort"
 	"strings"
+	"sync"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // agentDef describes a terminal AI agent CLI the TUI can launch (and optionally
@@ -237,6 +242,106 @@ PY="$HOME/.hermes/hermes-agent/venv/bin/python"; [ -x "$PY" ] || PY=python3
 echo %s | base64 -d > /tmp/oilsand-hermes-olla.py
 OLLA_BASE='%s' OLLA_KEY='%s' OLLA_MODEL='%s' "$PY" /tmp/oilsand-hermes-olla.py
 `, base, b64, base, key, model)
+}
+
+// agentUninstallScript returns the shell that removes an agent install from a
+// host. Best-effort by design: each step tolerates a partial/older install, and
+// user data that isn't clearly the agent's own install tree is left alone
+// (Crush keeps ~/.config/crush so a later reinstall finds its providers).
+func agentUninstallScript(a agentDef) string {
+	switch a.name {
+	case "Crush":
+		return `echo "[remove] uninstalling crush…"
+sudo dnf -y remove crush 2>/dev/null || true
+export PATH="$HOME/.npm-global/bin:$PATH"
+npm uninstall -g crush >/dev/null 2>&1 || true
+rm -f "$HOME/.local/bin/crush"
+echo "[remove] crush removed (config kept in ~/.config/crush)"
+`
+	case "OpenClaw":
+		return `echo "[remove] uninstalling openclaw…"
+export PATH="$HOME/.npm-global/bin:$PATH"
+npm uninstall -g openclaw >/dev/null 2>&1 || true
+rm -f "$HOME/.local/bin/openclaw" "$HOME/.npm-global/bin/openclaw"
+rm -rf "$HOME/.openclaw"
+echo "[remove] openclaw removed"
+`
+	case "Hermes":
+		return `echo "[remove] uninstalling hermes…"
+HERMES_BIN="$(command -v hermes || echo "$HOME/.local/bin/hermes")"
+if [ -x "$HERMES_BIN" ]; then
+  HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway stop </dev/null >/dev/null 2>&1 || true
+  HERMES_NONINTERACTIVE=1 "$HERMES_BIN" gateway uninstall </dev/null >/dev/null 2>&1 || true
+fi
+systemctl --user disable --now hermes-gateway >/dev/null 2>&1 || true
+sudo systemctl disable --now hermes-gateway >/dev/null 2>&1 || true
+export PATH="$HOME/.npm-global/bin:$PATH"
+npm uninstall -g hermes >/dev/null 2>&1 || true
+rm -f "$HOME/.local/bin/hermes" "$HOME/.npm-global/bin/hermes"
+rm -rf "$HOME/.hermes"
+echo "[remove] hermes removed"
+`
+	}
+	return ""
+}
+
+// agentRemovedMsg reports the outcome of removing an agent's deployment(s):
+// per-host uninstalls for host agents, or container deletions for Nanoclaw.
+type agentRemovedMsg struct {
+	agent     string
+	container bool
+	removed   int      // uninstalled hosts, or deleted containers
+	okHosts   []string // hosts whose uninstall succeeded (host agents)
+	errs      []string
+}
+
+// agentUninstallCmd runs an agent's uninstall script on every listed host in
+// parallel (locally when a host is this machine) and reports which succeeded.
+func agentUninstallCmd(a agentDef, hosts []string, user, pass string) tea.Cmd {
+	script := agentUninstallScript(a)
+	if script == "" {
+		return func() tea.Msg { return notifyMsg(a.name + " has no uninstall routine") }
+	}
+	return func() tea.Msg {
+		msg := agentRemovedMsg{agent: a.name}
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, h := range hosts {
+			wg.Add(1)
+			go func(h string) {
+				defer wg.Done()
+				var out string
+				var err error
+				switch {
+				case isLocalHost(h):
+					b, e := exec.Command("bash", "-lc", script).CombinedOutput()
+					out, err = string(b), e
+				case pass == "":
+					err = fmt.Errorf("no SSH password configured")
+				default:
+					client, e := dialSSH(h, user, pass)
+					if e != nil {
+						err = e
+					} else {
+						out, err = runSSH(client, script)
+						client.Close()
+					}
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					msg.errs = append(msg.errs, h+": "+strings.TrimSpace(err.Error()+" "+lastNonEmptyLine(out)))
+					return
+				}
+				msg.okHosts = append(msg.okHosts, h)
+			}(h)
+		}
+		wg.Wait()
+		sort.Strings(msg.okHosts)
+		sort.Strings(msg.errs)
+		msg.removed = len(msg.okHosts)
+		return msg
+	}
 }
 
 func agentByName(name string) (agentDef, bool) {
