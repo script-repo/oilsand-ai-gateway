@@ -33,11 +33,23 @@ const nanoclawDockerfileLabel = "oilsand.dockerfile-sha256"
 // dist/index.js), so the image must compile it — pnpm install + pnpm run build
 // — before the runtime CMD. The store directory is a volume so each container
 // instance keeps its own persistent state.
+//
+// NanoClaw itself sandboxes every agent in a container of its own, so the
+// image carries a full inner Docker engine (docker-in-docker) that the
+// entrypoint starts before NanoClaw. Mounting the host's docker socket
+// instead would not work: NanoClaw bind-mounts paths from its own filesystem
+// (groups/, data/, …) into agent containers, and a host daemon would resolve
+// those paths against the host, where they don't exist.
 const nanoclawDockerfile = `# Nanoclaw agent image, built by the Oilsand AI Gateway TUI.
 # Every deployed instance is a separate container from this one image.
 FROM node:22-bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
+ && apt-get install -y --no-install-recommends git ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+# Inner Docker engine: NanoClaw refuses to start without a container runtime
+# ("docker info" must succeed inside this container) and uses it to sandbox
+# its agents. Requires the instance to run with --privileged.
+RUN curl -fsSL https://get.docker.com | sh \
  && rm -rf /var/lib/apt/lists/*
 # Upstream pins pnpm via the packageManager field; corepack provides it.
 RUN corepack enable || npm install -g pnpm
@@ -50,7 +62,38 @@ RUN pnpm run build
 # just-built version marks this image as a sanctioned install. Guarded so
 # older upstream revisions without the tripwire still build.
 RUN [ ! -f scripts/upgrade-state.ts ] || pnpm exec tsx scripts/upgrade-state.ts set
+# Entrypoint: bring up the inner dockerd, wait until it answers, then hand
+# off to CMD. The cgroup shuffle mirrors the official docker:dind entrypoint —
+# on cgroup v2 dockerd can only enable controllers for child cgroups once the
+# root cgroup's processes have moved into a leaf.
+COPY <<'ENTRYPOINT_EOF' /usr/local/bin/nanoclaw-entrypoint.sh
+#!/bin/sh
+set -e
+if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+  mkdir -p /sys/fs/cgroup/init
+  xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs || true
+  sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers \
+    > /sys/fs/cgroup/cgroup.subtree_control || true
+fi
+dockerd > /var/log/dockerd.log 2>&1 &
+i=0
+until docker info >/dev/null 2>&1; do
+  i=$((i+1))
+  if [ "$i" -ge 60 ]; then
+    echo "[entrypoint] inner dockerd failed to start (is the container privileged?):" >&2
+    tail -n 50 /var/log/dockerd.log >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
+exec "$@"
+ENTRYPOINT_EOF
+RUN chmod +x /usr/local/bin/nanoclaw-entrypoint.sh
 VOLUME /opt/nanoclaw/store
+# Inner image/container storage. Must be a volume: the inner dockerd cannot
+# run overlay2 on top of the outer container's overlayfs.
+VOLUME /var/lib/docker
+ENTRYPOINT ["/usr/local/bin/nanoclaw-entrypoint.sh"]
 CMD ["node", "dist/index.js"]
 `
 
@@ -119,8 +162,9 @@ for _i in $(seq 1 %d); do
   while sudo docker ps -a --format '{{.Names}}' | grep -qx "nanoclaw-$(printf '%%02d' "$n")"; do n=$((n+1)); done
   NAME="nanoclaw-$(printf '%%02d' "$n")"
   echo "[deploy] starting container $NAME…"
-  sudo docker run -d --restart unless-stopped --name "$NAME" \
+  sudo docker run -d --restart unless-stopped --privileged --name "$NAME" \
     -v "oilsand-$NAME:/opt/nanoclaw/store" \
+    -v "oilsand-$NAME-docker:/var/lib/docker" \
     -e OPENAI_BASE_URL='%s' \
     -e OPENAI_API_KEY='%s' \
     -e ANTHROPIC_BASE_URL='%s' \
@@ -160,7 +204,7 @@ sudo docker logs -f --tail 40 "$LATEST"
 // just-built "$NANO_IMG" image. A plain `docker restart` would leave every
 // instance on the image it was created from, so each container is removed and
 // re-run — its config env (OPENAI_/ANTHROPIC_/NANOCLAW_/OILSAND_) is carried
-// over via docker inspect and its state volume survives by name. Shared by
+// over via docker inspect and its state volumes survive by name. Shared by
 // deploy (after an image rebuild) and update. Expects $NANO_IMG to be set and
 // contains no fmt verbs, so it can be concatenated into Sprintf formats.
 const nanoclawRecreateFragment = `  for c in $(sudo docker ps -a --format '{{.Names}}' | grep '^nanoclaw-' || true); do
@@ -169,8 +213,10 @@ const nanoclawRecreateFragment = `  for c in $(sudo docker ps -a --format '{{.Na
     sudo docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
       | grep -E '^(OPENAI_|ANTHROPIC_|NANOCLAW_|OILSAND_)' > "$ENVF" || true
     sudo docker rm -f "$c" >/dev/null || true
-    sudo docker run -d --restart unless-stopped --name "$c" \
-      -v "oilsand-$c:/opt/nanoclaw/store" --env-file "$ENVF" "$NANO_IMG" >/dev/null
+    sudo docker run -d --restart unless-stopped --privileged --name "$c" \
+      -v "oilsand-$c:/opt/nanoclaw/store" \
+      -v "oilsand-$c-docker:/var/lib/docker" \
+      --env-file "$ENVF" "$NANO_IMG" >/dev/null
     rm -f "$ENVF"
   done
 `
@@ -311,6 +357,7 @@ func nanoclawRemoveScript(names []string, volumes bool) string {
 		fmt.Fprintf(&b, "sudo docker rm -f '%s'\n", shSingle(n))
 		if volumes {
 			fmt.Fprintf(&b, "sudo docker volume rm 'oilsand-%s' >/dev/null 2>&1 || true\n", shSingle(n))
+			fmt.Fprintf(&b, "sudo docker volume rm 'oilsand-%s-docker' >/dev/null 2>&1 || true\n", shSingle(n))
 		}
 	}
 	return b.String()

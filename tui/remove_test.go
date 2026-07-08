@@ -55,7 +55,7 @@ func TestAgentUninstallScripts(t *testing.T) {
 
 func TestNanoclawRemoveScript(t *testing.T) {
 	s := nanoclawRemoveScript([]string{"nanoclaw-02"}, true)
-	for _, want := range []string{"docker rm -f 'nanoclaw-02'", "docker volume rm 'oilsand-nanoclaw-02'"} {
+	for _, want := range []string{"docker rm -f 'nanoclaw-02'", "docker volume rm 'oilsand-nanoclaw-02'", "docker volume rm 'oilsand-nanoclaw-02-docker'"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("remove script missing %q:\n%s", want, s)
 		}

@@ -119,14 +119,16 @@ func TestNanoclawCatalogAndScript(t *testing.T) {
 	m := &model{gateway: "http://10.0.0.1:40114", token: "tok-123", defModel: "rnj-1"}
 	script := m.nanoclawDeployScript(3)
 	for _, want := range []string{
-		"seq 1 3",                               // three instances
-		"nanoclaw-$(printf",                     // auto-incremented container names
-		nanoclawImage,                           // shared per-worker image
-		"http://10.0.0.1:40114/olla/openai/v1",  // Olla endpoint wired in
-		"OPENAI_API_KEY='tok-123'",              // token wired in
-		"NANOCLAW_MODEL='rnj-1'",                // default model wired in
-		"docker run -d --restart unless-stopped", // isolated containers
-		"-v \"oilsand-$NAME:",                   // per-instance state volume
+		"seq 1 3",                                     // three instances
+		"nanoclaw-$(printf",                           // auto-incremented container names
+		nanoclawImage,                                 // shared per-worker image
+		"http://10.0.0.1:40114/olla/openai/v1",        // Olla endpoint wired in
+		"OPENAI_API_KEY='tok-123'",                    // token wired in
+		"NANOCLAW_MODEL='rnj-1'",                      // default model wired in
+		"docker run -d --restart unless-stopped",      // isolated containers
+		"--privileged",                                // required by the inner dockerd
+		"-v \"oilsand-$NAME:",                         // per-instance state volume
+		"-v \"oilsand-$NAME-docker:/var/lib/docker\"", // per-instance inner-docker storage
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("deploy script missing %q:\n%s", want, script)
@@ -166,11 +168,18 @@ func TestNanoclawDockerfileBuildsDist(t *testing.T) {
 	// Upstream "start" runs dist/index.js, so the image must compile the
 	// TypeScript source (pnpm install + build) before it can run. The build
 	// must also record the upgrade marker, or NanoClaw's tripwire treats the
-	// fresh clone as an unsanctioned update and refuses to start.
+	// fresh clone as an unsanctioned update and refuses to start. And since
+	// NanoClaw sandboxes its agents in containers, the image must carry an
+	// inner Docker engine that the entrypoint starts before NanoClaw — without
+	// it every instance crash-loops on "docker: not found".
 	for _, want := range []string{
 		"pnpm install",
 		"pnpm run build",
 		"upgrade-state.ts set",
+		"get.docker.com", // inner Docker engine baked in
+		"dockerd",        // …started by the entrypoint
+		"VOLUME /var/lib/docker",
+		`ENTRYPOINT ["/usr/local/bin/nanoclaw-entrypoint.sh"]`,
 		`CMD ["node", "dist/index.js"]`,
 	} {
 		if !strings.Contains(nanoclawDockerfile, want) {
@@ -185,12 +194,14 @@ func TestNanoclawUpdateRecreatesContainers(t *testing.T) {
 	// per-instance state volume.
 	script := nanoclawUpdateScript()
 	for _, want := range []string{
-		"base64 -d",             // restages the current Dockerfile before building
-		"docker rm -f",          // old container goes away…
-		"docker run -d",         // …and is recreated on the new image
-		"--env-file",            // config env carried over
-		"-v \"oilsand-$c:",      // state volume survives by name
-		nanoclawDockerfileLabel, // image labeled so the next deploy sees it as current
+		"base64 -d",        // restages the current Dockerfile before building
+		"docker rm -f",     // old container goes away…
+		"docker run -d",    // …and is recreated on the new image
+		"--privileged",     // required by the inner dockerd
+		"--env-file",       // config env carried over
+		"-v \"oilsand-$c:", // state volume survives by name
+		"-v \"oilsand-$c-docker:/var/lib/docker\"", // inner-docker storage too
+		nanoclawDockerfileLabel,                    // image labeled so the next deploy sees it as current
 		nanoclawImage,
 	} {
 		if !strings.Contains(script, want) {
