@@ -138,6 +138,30 @@ func TestNanoclawCatalogAndScript(t *testing.T) {
 	}
 }
 
+func TestNanoclawDeployRebuildsStaleImage(t *testing.T) {
+	// A worker bootstrapped by an older TUI keeps its original image unless
+	// the deploy notices the staged Dockerfile changed and rebuilds — images
+	// from before the upgrade marker was baked in crash-loop on NanoClaw's
+	// upgrade tripwire. The rebuild is detected by comparing the staged
+	// Dockerfile's sha256 against a label on the image, and existing
+	// containers are recreated on the rebuilt image so they converge too.
+	m := &model{gateway: "http://10.0.0.1:40114"}
+	script := m.nanoclawDeployScript(1)
+	for _, want := range []string{
+		"sha256sum",             // hash of the staged Dockerfile…
+		nanoclawDockerfileLabel, // …compared against the image label
+		`--label "` + nanoclawDockerfileLabel + `=$DF_SHA"`, // and recorded on rebuild
+		nanoclawRecreateFragment,                            // existing containers move to the new image
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("deploy script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "if ! sudo docker image inspect") {
+		t.Fatal("deploy still skips the build whenever the image merely exists")
+	}
+}
+
 func TestNanoclawDockerfileBuildsDist(t *testing.T) {
 	// Upstream "start" runs dist/index.js, so the image must compile the
 	// TypeScript source (pnpm install + build) before it can run. The build
@@ -161,11 +185,12 @@ func TestNanoclawUpdateRecreatesContainers(t *testing.T) {
 	// per-instance state volume.
 	script := nanoclawUpdateScript()
 	for _, want := range []string{
-		"base64 -d",        // restages the current Dockerfile before building
-		"docker rm -f",     // old container goes away…
-		"docker run -d",    // …and is recreated on the new image
-		"--env-file",       // config env carried over
-		"-v \"oilsand-$c:", // state volume survives by name
+		"base64 -d",             // restages the current Dockerfile before building
+		"docker rm -f",          // old container goes away…
+		"docker run -d",         // …and is recreated on the new image
+		"--env-file",            // config env carried over
+		"-v \"oilsand-$c:",      // state volume survives by name
+		nanoclawDockerfileLabel, // image labeled so the next deploy sees it as current
 		nanoclawImage,
 	} {
 		if !strings.Contains(script, want) {
