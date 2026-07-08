@@ -21,6 +21,13 @@ import (
 
 const nanoclawImage = "oilsand/nanoclaw:latest"
 
+// nanoclawDockerfileLabel records, on the built image, the sha256 of the
+// Dockerfile it was built from. Deploys compare it against the staged
+// Dockerfile so a worker bootstrapped by an older TUI rebuilds instead of
+// stamping out containers from a stale image (e.g. one without the upgrade
+// marker, which NanoClaw's tripwire refuses to start).
+const nanoclawDockerfileLabel = "oilsand.dockerfile-sha256"
+
 // nanoclawDockerfile builds the per-worker Nanoclaw image from the upstream
 // project. Upstream is TypeScript managed with pnpm ("start" runs
 // dist/index.js), so the image must compile it — pnpm install + pnpm run build
@@ -88,18 +95,24 @@ func (m *model) nanoclawDeployScript(instances int) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	b.WriteString(dockerBootstrap)
-	// The Dockerfile is (re)staged on every deploy — not just the first — so
-	// workers bootstrapped by an older TUI pick up Dockerfile fixes on the
-	// next image rebuild instead of being stuck with the copy they were born
-	// with.
+	// The Dockerfile is (re)staged on every deploy and the image is rebuilt
+	// whenever it no longer matches the Dockerfile it was built from (tracked
+	// via a label carrying the Dockerfile's sha256). Without this, a worker
+	// bootstrapped by an older TUI keeps its original image forever and every
+	// new instance inherits its bugs — e.g. images from before the upgrade
+	// marker was baked in crash-loop on NanoClaw's upgrade tripwire. After a
+	// rebuild any existing containers are recreated on the new image so the
+	// whole worker converges instead of only the instances added today.
 	b.WriteString(fmt.Sprintf(`NANO_IMG='%s'
 mkdir -p "$HOME/.nanoclaw"
 echo %s | base64 -d > "$HOME/.nanoclaw/Dockerfile"
-if ! sudo docker image inspect "$NANO_IMG" >/dev/null 2>&1; then
-  echo "[deploy] building $NANO_IMG (first run on this worker — pulls the node base image)…"
-  sudo docker build -t "$NANO_IMG" "$HOME/.nanoclaw"
-fi
-`, nanoclawImage, dfB64))
+DF_SHA="$(sha256sum "$HOME/.nanoclaw/Dockerfile" | cut -d' ' -f1)"
+IMG_SHA="$(sudo docker image inspect "$NANO_IMG" --format '{{index .Config.Labels "%s"}}' 2>/dev/null || true)"
+if [ "$IMG_SHA" != "$DF_SHA" ]; then
+  echo "[deploy] building $NANO_IMG (image missing or built from an outdated Dockerfile)…"
+  sudo docker build --label "%s=$DF_SHA" -t "$NANO_IMG" "$HOME/.nanoclaw"
+`+nanoclawRecreateFragment+`fi
+`, nanoclawImage, dfB64, nanoclawDockerfileLabel, nanoclawDockerfileLabel))
 	b.WriteString(fmt.Sprintf(`started=""
 for _i in $(seq 1 %d); do
   n=1
@@ -143,32 +156,41 @@ echo "[nanoclaw] following logs of $LATEST (ctrl+c to detach)…"
 sudo docker logs -f --tail 40 "$LATEST"
 `
 
-// nanoclawUpdateScript restages the current Dockerfile, rebuilds the image
-// against the latest upstream, and recreates the containers on it. A plain
-// `docker restart` would leave every instance on the image it was created
-// from, so each container is removed and re-run — its config env
-// (OPENAI_/ANTHROPIC_/NANOCLAW_) is carried over and its state volume
-// survives by name.
-func nanoclawUpdateScript() string {
-	dfB64 := base64.StdEncoding.EncodeToString([]byte(nanoclawDockerfile))
-	return fmt.Sprintf(`echo '[update] rebuilding nanoclaw image'
-mkdir -p "$HOME/.nanoclaw"
-echo %s | base64 -d > "$HOME/.nanoclaw/Dockerfile"
-if sudo docker build --pull --no-cache -t '%s' "$HOME/.nanoclaw"; then
-  for c in $(sudo docker ps -a --format '{{.Names}}' | grep '^nanoclaw-' || true); do
-    echo "[update] recreating $c on the new image"
+// nanoclawRecreateFragment recreates every existing nanoclaw container on the
+// just-built "$NANO_IMG" image. A plain `docker restart` would leave every
+// instance on the image it was created from, so each container is removed and
+// re-run — its config env (OPENAI_/ANTHROPIC_/NANOCLAW_/OILSAND_) is carried
+// over via docker inspect and its state volume survives by name. Shared by
+// deploy (after an image rebuild) and update. Expects $NANO_IMG to be set and
+// contains no fmt verbs, so it can be concatenated into Sprintf formats.
+const nanoclawRecreateFragment = `  for c in $(sudo docker ps -a --format '{{.Names}}' | grep '^nanoclaw-' || true); do
+    echo "[nanoclaw] recreating $c on the new image"
     ENVF="$(mktemp)"
     sudo docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' \
       | grep -E '^(OPENAI_|ANTHROPIC_|NANOCLAW_|OILSAND_)' > "$ENVF" || true
     sudo docker rm -f "$c" >/dev/null || true
     sudo docker run -d --restart unless-stopped --name "$c" \
-      -v "oilsand-$c:/opt/nanoclaw/store" --env-file "$ENVF" '%s' >/dev/null
+      -v "oilsand-$c:/opt/nanoclaw/store" --env-file "$ENVF" "$NANO_IMG" >/dev/null
     rm -f "$ENVF"
   done
-else
+`
+
+// nanoclawUpdateScript restages the current Dockerfile, rebuilds the image
+// against the latest upstream, and recreates the containers on it. The build
+// is labeled with the Dockerfile's sha256 (like deploy) so a later deploy
+// recognizes the image as current instead of rebuilding it again.
+func nanoclawUpdateScript() string {
+	dfB64 := base64.StdEncoding.EncodeToString([]byte(nanoclawDockerfile))
+	return fmt.Sprintf(`echo '[update] rebuilding nanoclaw image'
+NANO_IMG='%s'
+mkdir -p "$HOME/.nanoclaw"
+echo %s | base64 -d > "$HOME/.nanoclaw/Dockerfile"
+DF_SHA="$(sha256sum "$HOME/.nanoclaw/Dockerfile" | cut -d' ' -f1)"
+if sudo docker build --pull --no-cache --label "%s=$DF_SHA" -t "$NANO_IMG" "$HOME/.nanoclaw"; then
+`+nanoclawRecreateFragment+`else
   echo '[update] rebuild failed — keeping current image and containers'
 fi
-sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'`, dfB64, nanoclawImage, nanoclawImage)
+sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'`, nanoclawImage, dfB64, nanoclawDockerfileLabel)
 }
 
 // nanoclawOpenCmd stages the open script on the worker and returns a

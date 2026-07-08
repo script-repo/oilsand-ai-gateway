@@ -224,8 +224,12 @@ Deploying (press `d` on Nanoclaw in the **Agents** section):
 
 1. Pick the target worker and how many **Instances** to start (default `1`).
 2. The deploy bootstraps Docker on the worker if needed (docker-ce on Rocky/RHEL,
-   `get.docker.com` on Ubuntu/Debian) and builds the shared `oilsand/nanoclaw` image once
-   per worker (from the upstream [NanoClaw](https://github.com/qwibitai/nanoclaw) project).
+   `get.docker.com` on Ubuntu/Debian) and builds the shared `oilsand/nanoclaw` image
+   (from the upstream [NanoClaw](https://github.com/qwibitai/nanoclaw) project). The image
+   is rebuilt whenever the TUI's Dockerfile has changed since it was last built (tracked
+   via an image label with the Dockerfile's hash), and existing containers are then
+   recreated on the fresh image — so a worker bootstrapped by an older TUI converges on
+   the next deploy instead of stamping out containers from a stale image.
 3. Each instance gets the next free auto-incremented container name (`nanoclaw-01`,
    `nanoclaw-02`, …) and its **own named state volume** (`oilsand-nanoclaw-NN`), started
    with `--restart unless-stopped` so instances survive reboots.
