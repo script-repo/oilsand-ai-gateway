@@ -333,6 +333,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case apiGateMsg:
+		if msg.err != nil {
+			m.notice = "front door install failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.apiGateOn = true
+		m.notice = orDefault(msg.out, "front door installed")
+		if h := hostFromURL(m.gateway); h != "" {
+			return m, fetchAPIKeysCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass)
+		}
+		return m, nil
+
+	case apiKeysMsg:
+		if msg.err != nil {
+			m.notice = "api keys: " + msg.err.Error()
+			return m, nil
+		}
+		m.apiGateOn = msg.on
+		m.apiKeys = msg.keys
+		if msg.saved {
+			m.notice = "key store updated on the gateway (nginx reloaded)"
+		}
+		return m, nil
+
 	case notifyMsg:
 		m.notice = string(msg)
 		var cmds []tea.Cmd
@@ -512,6 +536,13 @@ func (m *model) enterContent() tea.Cmd {
 	}
 	m.composer.Blur()
 	m.hubTA.Blur()
+	if m.section == secAccess {
+		// Refresh the front-door state lazily so the Access view shows the
+		// live key store without a manual action.
+		if h := hostFromURL(m.gateway); h != "" && (m.sshPass != "" || isLocalHost(h)) {
+			return fetchAPIKeysCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass)
+		}
+	}
 	return nil
 }
 
@@ -642,6 +673,24 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			m.createToken()
 		case "X":
 			m.clearToken()
+		case "v":
+			if h := hostFromURL(m.gateway); h != "" {
+				m.notice = "installing the /api/v1 front door on " + h + "…"
+				return m, installAPIGateCmd(h, orDefault(m.sshUser, "rocky"), m.sshPass)
+			}
+			m.notice = "connect to a gateway first"
+		case "k":
+			if !m.apiGateOn {
+				m.notice = "install the front door first (press v)"
+				return m, nil
+			}
+			return m, m.openAPIKey()
+		case "K", "x", "delete":
+			if len(m.apiKeys) == 0 {
+				m.notice = "no API keys to revoke"
+				return m, nil
+			}
+			return m, m.openAPIKeyRemove()
 		}
 		return m, nil
 

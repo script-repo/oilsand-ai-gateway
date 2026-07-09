@@ -11,14 +11,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// endpointEntry is one static discovery endpoint in olla.yaml.
+// endpointEntry is one static discovery endpoint in olla.yaml. The URL may
+// include a base path (e.g. https://nai-host/api for backends whose OpenAI API
+// lives under /api/v1): Olla appends profile paths after it, ModelURL /
+// HealthCheckURL override the profile's discovery/health paths, and
+// PreservePath keeps the base path when proxying. Extra catches any per-
+// endpoint keys this struct doesn't model so operator-added fields survive the
+// read-modify-write round trip every endpoint edit performs (mutateEndpoints);
+// without it they would be silently stripped from olla.yaml.
 type endpointEntry struct {
-	URL           string `yaml:"url"`
-	Name          string `yaml:"name"`
-	Type          string `yaml:"type"`
-	Priority      int    `yaml:"priority"`
-	CheckInterval string `yaml:"check_interval,omitempty"`
-	CheckTimeout  string `yaml:"check_timeout,omitempty"`
+	URL            string         `yaml:"url"`
+	Name           string         `yaml:"name"`
+	Type           string         `yaml:"type"`
+	Priority       int            `yaml:"priority"`
+	CheckInterval  string         `yaml:"check_interval,omitempty"`
+	CheckTimeout   string         `yaml:"check_timeout,omitempty"`
+	ModelURL       string         `yaml:"model_url,omitempty"`
+	HealthCheckURL string         `yaml:"health_check_url,omitempty"`
+	PreservePath   bool           `yaml:"preserve_path,omitempty"`
+	Extra          map[string]any `yaml:",inline"`
 }
 
 func dialSSH(host, user, password string) (*ssh.Client, error) {

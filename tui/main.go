@@ -59,6 +59,12 @@ func main() {
 		applyCapabilities(os.Args[2:])
 		return
 	}
+	// Headless subcommand: install the TLS + API-key /api/v1 front door
+	// (nginx) on the gateway VM, same as pressing `v` in the Access section.
+	if len(os.Args) > 1 && os.Args[1] == "apply-api-gate" {
+		applyAPIGate(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "ssh-exec" {
 		sshExec(os.Args[2:])
 		return
@@ -138,6 +144,27 @@ func applyCapabilities(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("ok:", msg)
+}
+
+func applyAPIGate(args []string) {
+	fs := flag.NewFlagSet("apply-api-gate", flag.ExitOnError)
+	host := fs.String("gateway", os.Getenv("OLLA_GATEWAY"), "gateway host or URL (the SSH host is derived from it)")
+	user := fs.String("ssh-user", envOr("OLLA_SSH_USER", "rocky"), "SSH user for the gateway VM")
+	pass := fs.String("ssh-password", os.Getenv("OLLA_SSH_PASSWORD"), "SSH password for the gateway VM")
+	_ = fs.Parse(args)
+
+	h := hostFromURL(normalizeGateway(*host))
+	if h == "" {
+		fmt.Fprintln(os.Stderr, "apply-api-gate: --gateway is required")
+		os.Exit(2)
+	}
+	fmt.Printf("installing the https://%s/api/v1 front door (nginx + TLS + API keys)…\n", h)
+	out, err := runOnGateway(h, *user, *pass, apiGateInstallScript())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "apply-api-gate failed:", err, strings.TrimSpace(out))
+		os.Exit(1)
+	}
+	fmt.Println(strings.TrimSpace(out))
 }
 
 func applyBalancer(args []string) {

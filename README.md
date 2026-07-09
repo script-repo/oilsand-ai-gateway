@@ -131,6 +131,17 @@ Sections:
   image** of the backing VM. `a` opens the add-endpoint modal,
   `x` removes the selected one; both edit the gateway's `/etc/olla/olla.yaml` over SSH
   (Go `x/crypto/ssh`) and restart Olla.
+
+  Endpoint URLs may include a **base path** for backends whose OpenAI-compatible API doesn't
+  live at the URL root — e.g. Nutanix Enterprise AI serves it under `/api/v1`, so the endpoint
+  URL is `https://nai-host/api` (Olla appends the profile's `/v1/...` paths after the base
+  path). The add-endpoint modal auto-sets Olla's `preserve_path` for such URLs and offers
+  optional **model discovery** / **health check** URL overrides. These per-endpoint fields —
+  and any other operator-added keys in `olla.yaml` — now survive endpoint edits from the TUI
+  (they used to be silently stripped by the read-modify-write cycle). Caveat: worker
+  registration via `nutanix_olla_vm.py` renders `olla.yaml` from its own local state, so
+  endpoints added only from the TUI on another machine can be lost by a later Python-driven
+  worker deploy from a different host.
 * **Models** — filterable list of pool models. `p` opens the pull modal (animated `bubbles/progress`
   gradient bar), `x` deletes the selected model, and `Enter` makes it the active chat model.
   This is how you swap the model Ollama serves.
@@ -201,7 +212,21 @@ Sections:
   `~/.cursor/mcp.json` and never stored in code. The client auto-negotiates the Prism Central v4
   API version (it tries `v4.2`, then `v4.1`, then `v4.0`) so it works across PC releases.
 * **Access** — create/rotate a client API token (`t`/`X`); shows the OpenAI Base URL, token, model
-  and a `curl` example.
+  and a `curl` example. Note Olla Community does not enforce inbound keys — the plain base URL
+  (`http://gateway:40114/olla/openai/v1`) is unauthenticated.
+
+  **Secured `/api/v1` front door** — press `v` to install a small TLS + API-key layer (nginx)
+  on the gateway VM, giving clients a clean, authenticated base URL: `https://gateway/api/v1`
+  (port 443). It validates `Authorization: Bearer <key>` and rejects unknown keys with 401.
+  `k` creates a key (each key **maps to an upstream**: the whole Olla pool by default, any
+  registered non-Ollama endpoint such as OmniRoute or a Nutanix Enterprise AI endpoint, or a
+  custom URL — targets should be IP-based); an optional **upstream API key** per key replaces
+  the client's Authorization header for backends that enforce their own auth. `x` revokes a
+  key (immediate — nginx reload, in-flight streams survive). The key store is a fully managed
+  nginx map file on the gateway (`/etc/nginx/conf.d/olla-api-keys.conf`), so the gateway stays
+  the single source of truth. The certificate is self-signed: use `curl -k` or import
+  `/etc/nginx/olla-api.crt` into your client's trust store. Headless equivalent:
+  `oilsand-tui apply-api-gate --gateway <url> --ssh-password <pw>`.
 * **Update** — maintenance & upgrades. A list of seven actions (`enter` to run, `esc` to go back),
   each streaming its output into the Output pane below:
   1. **Update local machine** — downloads and runs the latest installer for this OS.

@@ -497,13 +497,38 @@ func (m model) viewAccess() string {
 	exKey := orDefault(m.token, "olla")
 	curl := fmt.Sprintf("curl %s/chat/completions \\\n  -H 'Authorization: Bearer %s' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"model\":\"%s\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'",
 		base, exKey, exModel)
-	return lipgloss.JoinVertical(lipgloss.Left,
-		labelStyle.Render("OpenAI-compatible Base URL"), "  "+base, "",
+
+	// Secured /api/v1 front door (nginx on the gateway; see apigate.go).
+	secure := dimStyle.Render("  not installed — press v to install (nginx, TLS, API keys)")
+	var keyLines []string
+	if m.apiGateOn {
+		gwHost := hostFromURL(m.gateway)
+		secure = "  https://" + orDefault(gwHost, "<gateway>") + "/api/v1" +
+			dimStyle.Render("   (self-signed cert: curl -k, or import /etc/nginx/olla-api.crt)")
+		if len(m.apiKeys) == 0 {
+			keyLines = append(keyLines, dimStyle.Render("  no keys yet — press k to create one"))
+		}
+		for _, k := range m.apiKeys {
+			up := ""
+			if k.UpstreamKey != "" {
+				up = " · upstream key set"
+			}
+			keyLines = append(keyLines, "  "+k.Name+" · "+k.Key+dimStyle.Render(" → "+k.Target+up))
+		}
+	}
+
+	parts := []string{
+		labelStyle.Render("OpenAI-compatible Base URL") + dimStyle.Render("   (no auth — Olla Community)"), "  " + base, "",
+		labelStyle.Render("Secured Base URL") + dimStyle.Render("   (v install/refresh · k new key · x revoke)"), secure,
+	}
+	parts = append(parts, keyLines...)
+	parts = append(parts, "",
 		labelStyle.Render("API key / token")+dimStyle.Render("   (t new · X clear)"), "  "+token,
-		dimStyle.Render("  Olla Community does not enforce inbound keys; use for client configs."), "",
+		dimStyle.Render("  Olla Community does not enforce inbound keys; the secured URL above does."), "",
 		labelStyle.Render("Model"), "  "+mdl, "",
 		labelStyle.Render("Example"), codeStyle.Render("  "+strings.ReplaceAll(curl, "\n", "\n  ")),
 	)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // ---- modal -----------------------------------------------------------------
@@ -525,6 +550,8 @@ func (m model) viewModal() string {
 		modalCustomDeploy: "Add custom deployment",
 		modalAgentRemove:  "Remove agent",
 		modalNanoConnect:  "Connect to Nanoclaw instance",
+		modalAPIKey:       "New API key (/api/v1 front door)",
+		modalAPIKeyRemove: "Revoke API key",
 	}
 	inner := modalTitle.Render(titles[m.modal]) + "\n\n" + m.form.View()
 	box := modalBox.Render(inner)

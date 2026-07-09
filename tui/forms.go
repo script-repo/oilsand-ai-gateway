@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	neturl "net/url"
 	"strconv"
 	"strings"
 
@@ -106,15 +107,44 @@ func (m *model) openEndpoint() tea.Cmd {
 		return nil
 	}
 	m.fEpName, m.fEpURL, m.fEpType, m.fEpPrio = "", "", "ollama", "100"
+	m.fEpModelURL, m.fEpHealth = "", ""
 	m.modal = modalEndpoint
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("epname").Title("Endpoint name").Placeholder("ollama-worker-03").Value(&m.fEpName),
-		huh.NewInput().Key("epurl").Title("Endpoint URL").Placeholder("http://worker-host:11434").Value(&m.fEpURL),
+		huh.NewInput().Key("epurl").Title("Endpoint URL").Placeholder("http://worker-host:11434").
+			Description("may include a base path, e.g. https://nai-host/api").Value(&m.fEpURL),
 		huh.NewSelect[string]().Key("eptype").Title("Type").
 			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
 		huh.NewInput().Key("epprio").Title("Priority").Placeholder("100").Value(&m.fEpPrio),
+		huh.NewInput().Key("epmodelurl").Title("Model discovery URL (optional)").
+			Placeholder("blank = profile default").Value(&m.fEpModelURL),
+		huh.NewInput().Key("ephealth").Title("Health check URL (optional)").
+			Placeholder("blank = profile default").Value(&m.fEpHealth),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
+}
+
+// buildEndpointEntry assembles the olla.yaml endpoint from the add-endpoint
+// form values. When the URL carries a base path (e.g. https://nai-host/api,
+// for backends whose OpenAI API lives under /api/v1) preserve_path is set so
+// Olla keeps that prefix when proxying; profile paths are appended after it.
+func buildEndpointEntry(name, rawURL, typ, prioStr, modelURL, healthURL string) endpointEntry {
+	prio, _ := strconv.Atoi(prioStr)
+	if prio == 0 {
+		prio = 100
+	}
+	e := endpointEntry{
+		Name: name, URL: rawURL,
+		Type:          orDefault(typ, "ollama"),
+		Priority:      prio,
+		CheckInterval: "10s", CheckTimeout: "3s",
+		ModelURL:       modelURL,
+		HealthCheckURL: healthURL,
+	}
+	if u, err := neturl.Parse(rawURL); err == nil && u.Path != "" && u.Path != "/" {
+		e.PreservePath = true
+	}
+	return e
 }
 
 // openOmnirouteEndpoint builds the add-endpoint modal prefilled to register a
@@ -144,6 +174,7 @@ func (m *model) openOmnirouteEndpoint() tea.Cmd {
 		}
 	}
 	m.fEpName, m.fEpURL, m.fEpType, m.fEpPrio = name, "http://"+host+":"+omniroutePort, "openai", "100"
+	m.fEpModelURL, m.fEpHealth = "", ""
 	m.modal = modalEndpoint
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Key("epname").Title("Endpoint name").Placeholder("omniroute").Value(&m.fEpName),
@@ -151,6 +182,10 @@ func (m *model) openOmnirouteEndpoint() tea.Cmd {
 		huh.NewSelect[string]().Key("eptype").Title("Type").
 			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
 		huh.NewInput().Key("epprio").Title("Priority").Placeholder("100").Value(&m.fEpPrio),
+		huh.NewInput().Key("epmodelurl").Title("Model discovery URL (optional)").
+			Placeholder("blank = profile default").Value(&m.fEpModelURL),
+		huh.NewInput().Key("ephealth").Title("Health check URL (optional)").
+			Placeholder("blank = profile default").Value(&m.fEpHealth),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
 	return m.form.Init()
 }
@@ -160,6 +195,52 @@ func (m *model) openOmnirouteEndpoint() tea.Cmd {
 func sanitizeHostLabel(h string) string {
 	r := strings.NewReplacer(".", "-", ":", "-", "/", "-")
 	return strings.Trim(r.Replace(h), "-")
+}
+
+// openAPIKey builds the "new API key" modal for the /api/v1 front door: a
+// label, the upstream the key maps to (whole pool, any non-Ollama endpoint,
+// or a custom URL), and an optional upstream key for backends that enforce
+// their own auth (e.g. Nutanix Enterprise AI). The key itself is generated on
+// submit and shown in the Access view.
+func (m *model) openAPIKey() tea.Cmd {
+	m.fAkName, m.fAkTarget, m.fAkCustom, m.fAkUpKey = "", "pool", "", ""
+	opts := []huh.Option[string]{
+		huh.NewOption("whole pool (Olla, all workers)", "pool"),
+	}
+	for _, e := range m.endpoints {
+		if e.Type == "" || e.Type == "ollama" {
+			continue
+		}
+		opts = append(opts, huh.NewOption(e.Name+" → "+endpointTarget(e), endpointTarget(e)))
+	}
+	opts = append(opts, huh.NewOption("custom URL…", "custom"))
+	m.modal = modalAPIKey
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewInput().Key("akname").Title("Key name").Placeholder("team-a").Value(&m.fAkName),
+		huh.NewSelect[string]().Key("aktarget").Title("Routes to").
+			Options(opts...).Value(&m.fAkTarget),
+		huh.NewInput().Key("akcustom").Title("Custom target URL (if custom)").
+			Placeholder("http://10.0.0.9:20128/v1 (IP-based)").Value(&m.fAkCustom),
+		huh.NewInput().Key("akupkey").Title("Upstream API key (optional)").
+			Placeholder("blank = pass the client key through").Value(&m.fAkUpKey),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// openAPIKeyRemove builds the revoke picker over the current key store.
+func (m *model) openAPIKeyRemove() tea.Cmd {
+	var opts []huh.Option[string]
+	for _, k := range m.apiKeys {
+		opts = append(opts, huh.NewOption(k.Name+" · "+k.Key, k.Key))
+	}
+	m.fAkRemove = ""
+	m.modal = modalAPIKeyRemove
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Key("akremove").Title("Revoke which key?").
+			Description("takes effect immediately (nginx reload)").
+			Options(opts...).Value(&m.fAkRemove),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
 }
 
 // openPull builds the "pull model" modal.
@@ -696,19 +777,48 @@ func (m *model) onFormComplete() tea.Cmd {
 			m.notice = "endpoint name and URL are required"
 			return nil
 		}
-		prio, _ := strconv.Atoi(m.fstr("epprio"))
-		if prio == 0 {
-			prio = 100
-		}
-		e := endpointEntry{
-			Name: name, URL: url,
-			Type:          orDefault(m.fstr("eptype"), "ollama"),
-			Priority:      prio,
-			CheckInterval: "10s", CheckTimeout: "3s",
-		}
+		e := buildEndpointEntry(name, url, m.fstr("eptype"), m.fstr("epprio"),
+			m.fstr("epmodelurl"), m.fstr("ephealth"))
 		host := hostFromURL(m.gateway)
 		m.notice = "adding " + name + " via SSH to " + host + " …"
 		return sshAddAndKeyCmd(host, orDefault(m.sshUser, "rocky"), m.sshPass, e)
+
+	case modalAPIKey:
+		name := sanitizeKeyName(m.fstr("akname"))
+		if name == "" {
+			m.notice = "key name is required"
+			return nil
+		}
+		target := m.fstr("aktarget")
+		switch target {
+		case "pool":
+			target = poolTarget(m.gateway)
+		case "custom":
+			target = m.fstr("akcustom")
+			if target == "" {
+				m.notice = "enter the custom target URL"
+				return nil
+			}
+		}
+		entry := apiKeyEntry{Name: name, Key: newAPIKey(), Target: target, UpstreamKey: m.fstr("akupkey")}
+		keys := append(append([]apiKeyEntry(nil), m.apiKeys...), entry)
+		m.notice = "creating key " + name + " on the gateway…"
+		return saveAPIKeysCmd(hostFromURL(m.gateway), orDefault(m.sshUser, "rocky"), m.sshPass, keys)
+
+	case modalAPIKeyRemove:
+		revoke := m.fstr("akremove")
+		if revoke == "" {
+			m.notice = "no key selected"
+			return nil
+		}
+		var keys []apiKeyEntry
+		for _, k := range m.apiKeys {
+			if k.Key != revoke {
+				keys = append(keys, k)
+			}
+		}
+		m.notice = "revoking key on the gateway…"
+		return saveAPIKeysCmd(hostFromURL(m.gateway), orDefault(m.sshUser, "rocky"), m.sshPass, keys)
 
 	case modalPull:
 		name := m.fstr("model")

@@ -613,6 +613,13 @@ def render_olla_config(endpoints: Iterable[dict], port: int = OLLA_PORT) -> str:
                 "        check_interval: 10s",
                 "        check_timeout: 3s",
             ])
+            # Optional per-endpoint overrides for backends whose API lives
+            # under a base path (e.g. Nutanix Enterprise AI at /api/v1).
+            for key in ("model_url", "health_check_url"):
+                if ep.get(key):
+                    lines.append(f'        {key}: "{ep[key]}"')
+            if ep.get("preserve_path"):
+                lines.append("        preserve_path: true")
     lines.extend(["", "logging:", '  level: "info"', '  format: "json"', ""])
     return "\n".join(lines)
 
@@ -999,12 +1006,18 @@ def parse_endpoint_arg(spec: str) -> dict:
         fields[key.strip()] = val.strip()
     if not fields.get("name") or not fields.get("url"):
         fatal(f"invalid --endpoint '{spec}': name= and url= are required")
-    return {
+    endpoint = {
         "name": fields["name"],
         "url": fields["url"],
         "type": fields.get("type", "ollama"),
         "priority": int(fields.get("priority", 100)),
     }
+    for key in ("model_url", "health_check_url"):
+        if fields.get(key):
+            endpoint[key] = fields[key]
+    if fields.get("preserve_path", "").lower() in ("1", "true", "yes"):
+        endpoint["preserve_path"] = True
+    return endpoint
 
 
 # --- CLI --------------------------------------------------------------------

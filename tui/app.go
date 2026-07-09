@@ -82,6 +82,8 @@ const (
 	modalCustomDeploy
 	modalAgentRemove
 	modalNanoConnect
+	modalAPIKey
+	modalAPIKeyRemove
 )
 
 type chatRole int
@@ -247,17 +249,19 @@ type model struct {
 	modal modalKind
 	form  *huh.Form
 	// form-bound values
-	fGateway string
-	fSSHUser string
-	fSSHPass string
-	fEpName  string
-	fEpURL   string
-	fEpType  string
-	fEpPrio  string
-	fRole    string
-	fName    string
-	fModel   string
-	fCount   string
+	fGateway    string
+	fSSHUser    string
+	fSSHPass    string
+	fEpName     string
+	fEpURL      string
+	fEpType     string
+	fEpPrio     string
+	fEpModelURL string // optional model discovery URL override
+	fEpHealth   string // optional health check URL override
+	fRole       string
+	fName       string
+	fModel      string
+	fCount      string
 	// nutanix settings form values
 	fPCHost  string
 	fPCPort  string
@@ -301,6 +305,14 @@ type model struct {
 	fCustScheme string
 	fCustPort   string
 	fCustPath   string
+	// API front door (nginx on the gateway, see apigate.go)
+	apiGateOn bool          // the /api/v1 front door is installed on the gateway
+	apiKeys   []apiKeyEntry // keys parsed from the gateway's keys conf
+	fAkName   string
+	fAkTarget string
+	fAkCustom string
+	fAkUpKey  string
+	fAkRemove string
 
 	// hermes gateway / telegram config (persisted)
 	hermesCfg hermesSettings
