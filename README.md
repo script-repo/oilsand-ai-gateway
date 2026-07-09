@@ -152,6 +152,12 @@ Sections:
   * **Nanoclaw** (worker) — a lightweight agent that runs as **Docker containers** on any
     worker; deploy it multiple times (or set **Instances** > 1) to run several isolated
     instances side-by-side on the same node. See below.
+  * **OmniRoute** (worker) — the free [OmniRoute](https://github.com/diegosouzapw/OmniRoute) AI
+    gateway, deployed from its official Docker image as a single service container on a chosen
+    worker. It exposes an OpenAI-compatible API and a web dashboard on port `20128` and fans out
+    to 200+ upstream providers with failover; open its dashboard URL to add providers/keys. Its
+    SQLite state lives in the named `omniroute-data` volume, so redeploys and updates keep it.
+    Opening it (`enter`/`o`) prints the reachable URL and follows the container logs.
 
   `enter`/`o` opens an agent, `d` deploys one; worker agents prompt for the target worker.
   `i` shows the **Nanoclaw instance overview**: every container across every worker Nanoclaw
@@ -190,7 +196,8 @@ Sections:
   1. **Update local machine** — downloads and runs the latest installer for this OS.
   2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
   3. **Update agents** — upgrades Crush (gateway), re-launches OpenClaw and Hermes (workers),
-     and rebuilds + restarts Nanoclaw containers where deployed.
+     rebuilds + restarts Nanoclaw containers, and pulls + recreates the OmniRoute container
+     where deployed.
   4. **Update image** — changes the image used for new deployments (live PC image dropdown), and
      can **seed a new image into Prism Central**: choose a built-in **preset** (Rocky Linux 9,
      Rocky Linux 10, Ubuntu 24.04) or paste any qcow2/img **URL** (with an optional name). It is

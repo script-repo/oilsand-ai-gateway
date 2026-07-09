@@ -102,6 +102,14 @@ var agentCatalog = []agentDef{
 		endpoint:   "Olla OpenAI endpoint (whole pool)",
 		desc:       "Lightweight agent in Docker · multi-instance",
 	},
+	{
+		name:       "OmniRoute",
+		cli:        "omniroute",
+		deployable: true,
+		target:     "worker",
+		endpoint:   "OpenAI-compatible :" + omniroutePort + " · 200+ providers",
+		desc:       "AI gateway/router service in Docker",
+	},
 }
 
 // agentDeployScript returns the install bootstrap for an agent. Crush uses the
@@ -117,6 +125,10 @@ func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Nanoclaw" {
 		// Containerized: N isolated Docker containers on the chosen worker.
 		return m.nanoclawDeployScript(maxInt(m.agentInstances, 1))
+	}
+	if a.name == "OmniRoute" {
+		// Single long-running service container (the OmniRoute gateway).
+		return m.omnirouteDeployScript()
 	}
 	model := m.effDefaultModel()
 	gateway := a.name == "Hermes" && m.hermesGatewayWanted()
@@ -281,8 +293,25 @@ rm -f "$HOME/.local/bin/hermes" "$HOME/.npm-global/bin/hermes"
 rm -rf "$HOME/.hermes"
 echo "[remove] hermes removed"
 `
+	case "OmniRoute":
+		// Remove the service container; keep the omniroute-data volume so a later
+		// redeploy finds its providers/keys (like Crush keeps ~/.config/crush).
+		return `echo "[remove] stopping omniroute…"
+sudo docker rm -f omniroute >/dev/null 2>&1 || true
+echo "[remove] omniroute removed (config kept in the omniroute-data volume)"
+`
 	}
 	return ""
+}
+
+// agentOpenCmd is the remote/login command "open" launches for an agent. Most
+// agents just relaunch their CLI; OmniRoute is a background service, so opening
+// it prints its dashboard URL and follows the container logs instead.
+func agentOpenCmd(a agentDef) string {
+	if a.name == "OmniRoute" {
+		return loginShell(omnirouteConsoleScript())
+	}
+	return loginShell(a.cli)
 }
 
 // agentRemovedMsg reports the outcome of removing an agent's deployment(s):
