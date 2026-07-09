@@ -117,6 +117,51 @@ func (m *model) openEndpoint() tea.Cmd {
 	return m.form.Init()
 }
 
+// openOmnirouteEndpoint builds the add-endpoint modal prefilled to register a
+// deployed OmniRoute service as its own Olla endpoint. It seeds the same fields
+// as openEndpoint but for OmniRoute's OpenAI-compatible surface (type "openai",
+// port omniroutePort), so submit flows through the ordinary modalEndpoint path
+// and appends a new, distinctly named endpoint entry — it never merges into the
+// Ollama worker endpoints. The operator can review/adjust priority before it is
+// written (and should register only after configuring provider keys in the
+// OmniRoute dashboard, else Olla discovers no models and marks it unhealthy).
+func (m *model) openOmnirouteEndpoint() tea.Cmd {
+	if m.gateway == "" {
+		m.notice = "connect to a gateway first"
+		return nil
+	}
+	host := ""
+	if hs := m.omnirouteHosts(); len(hs) > 0 {
+		host = hs[0]
+	}
+	name := "omniroute"
+	// Guard against colliding with an existing Ollama worker of the same name
+	// (shouldn't happen, but keep the entry distinct if it did).
+	for _, e := range m.endpoints {
+		if (e.Type == "" || e.Type == "ollama") && e.Name == name && host != "" {
+			name = "omniroute-" + sanitizeHostLabel(host)
+			break
+		}
+	}
+	m.fEpName, m.fEpURL, m.fEpType, m.fEpPrio = name, "http://"+host+":"+omniroutePort, "openai", "100"
+	m.modal = modalEndpoint
+	m.form = huh.NewForm(huh.NewGroup(
+		huh.NewInput().Key("epname").Title("Endpoint name").Placeholder("omniroute").Value(&m.fEpName),
+		huh.NewInput().Key("epurl").Title("Endpoint URL").Placeholder("http://omniroute-host:"+omniroutePort).Value(&m.fEpURL),
+		huh.NewSelect[string]().Key("eptype").Title("Type").
+			Options(huh.NewOptions("ollama", "openai", "vllm", "lmstudio")...).Value(&m.fEpType),
+		huh.NewInput().Key("epprio").Title("Priority").Placeholder("100").Value(&m.fEpPrio),
+	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)
+	return m.form.Init()
+}
+
+// sanitizeHostLabel turns a host/IP into a safe endpoint-name suffix (dots and
+// colons become dashes) so a per-host OmniRoute endpoint name stays valid.
+func sanitizeHostLabel(h string) string {
+	r := strings.NewReplacer(".", "-", ":", "-", "/", "-")
+	return strings.Trim(r.Replace(h), "-")
+}
+
 // openPull builds the "pull model" modal.
 func (m *model) openPull() tea.Cmd {
 	if m.client == nil {

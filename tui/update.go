@@ -322,6 +322,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.notice = fmt.Sprintf("%s removed on %d host(s)", msg.agent, msg.removed)
 		}
+		// When OmniRoute is fully gone, drop its dedicated gateway endpoint too so
+		// Olla isn't left health-checking a dead openai endpoint.
+		if msg.agent == "OmniRoute" && len(msg.okHosts) > 0 {
+			if _, still := m.agentHosts["OmniRoute"]; !still {
+				if gw := hostFromURL(m.gateway); gw != "" && m.sshPass != "" {
+					return m, deregisterOmnirouteCmd(gw, orDefault(m.sshUser, "rocky"), m.sshPass, msg.okHosts)
+				}
+			}
+		}
 		return m, nil
 
 	case notifyMsg:
@@ -699,6 +708,21 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 			return m, m.openHermesCfg()
 		case "i":
 			return m, m.fetchNanoclawInstances()
+		case "g":
+			it, ok := m.agentsList.SelectedItem().(agentItem)
+			if !ok || it.name != "OmniRoute" {
+				m.notice = "only OmniRoute can be registered as a gateway endpoint"
+				return m, nil
+			}
+			if m.gateway == "" {
+				m.notice = "connect to a gateway first"
+				return m, nil
+			}
+			if len(m.omnirouteHosts()) == 0 {
+				m.notice = "deploy OmniRoute first (press d)"
+				return m, nil
+			}
+			return m, m.openOmnirouteEndpoint()
 		case "x", "delete":
 			return m, m.removeSelectedAgent()
 		case "r":

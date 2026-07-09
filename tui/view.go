@@ -301,7 +301,7 @@ func (m model) viewAgents() string {
 		worker = ws[0].host
 	}
 	loc := dimStyle.Render(fmt.Sprintf("  gateway %s · worker %s", orDefault(gw, "-"), worker))
-	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · x remove · i nanoclaw instances · e Telegram/gateway · r refresh · / filter")
+	hint := dimStyle.Render("enter/o open (ssh + launch CLI) · d deploy · g register OmniRoute w/ gateway · x remove · i nanoclaw instances · e Telegram/gateway · r refresh · / filter")
 	note := dimStyle.Render("Crush → Olla server · OpenClaw/Hermes → a worker's Ollama · Nanoclaw → Docker on a worker (multi-instance)")
 
 	gwState := "off (deploy launches CLI) · e to configure"

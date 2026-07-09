@@ -159,6 +159,17 @@ Sections:
     SQLite state lives in the named `omniroute-data` volume, so redeploys and updates keep it.
     Opening it (`enter`/`o`) prints the reachable URL and follows the container logs.
 
+    Press `g` to **register OmniRoute behind the Olla gateway as its own endpoint**. This
+    appends a *new, separate* `openai`-type entry (`http://<worker>:20128`) to the gateway's
+    `discovery.static.endpoints` — it does **not** join or alter the Ollama worker endpoints,
+    which stay on their own `ollama`/`:11434` entries. Because Olla routes by model name, the
+    gateway then serves OmniRoute's provider models (e.g. `gpt-4o`, `claude-*`) alongside your
+    local Ollama models on the same OpenAI-compatible surface, with failover. `g` opens the
+    add-endpoint modal prefilled so you can confirm the name/priority before it's written;
+    register only **after** adding your provider keys in the OmniRoute dashboard, otherwise Olla
+    discovers no models on it and marks it unhealthy. Removing OmniRoute (`x`) automatically
+    de-registers this endpoint, leaving the worker endpoints untouched.
+
   `enter`/`o` opens an agent, `d` deploys one; worker agents prompt for the target worker.
   `i` shows the **Nanoclaw instance overview**: every container across every worker Nanoclaw
   was ever deployed to (queried in parallel over SSH), with per-instance status and image —

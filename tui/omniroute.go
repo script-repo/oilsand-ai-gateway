@@ -1,6 +1,10 @@
 package main
 
-import "strings"
+import (
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 // OmniRoute (https://github.com/diegosouzapw/OmniRoute) is a free AI gateway:
 // a single OpenAI-compatible endpoint that fans out to 200+ upstream providers
@@ -69,6 +73,45 @@ echo "OmniRoute dashboard + OpenAI-compatible API: http://${IP:-localhost}:` + o
 sudo docker ps -a --filter name=omniroute --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo "[following omniroute logs - Ctrl-C to exit]"
 sudo docker logs -f --tail 50 omniroute`
+}
+
+// removeOmnirouteEndpointsFn drops the Olla endpoint(s) that represent OmniRoute
+// from the discovery list: entries carrying a managed OmniRoute name ("omniroute"
+// or the per-host "omniroute-<host>" fallback), plus any openai endpoint pointing
+// at one of the given hosts on omniroutePort. It only ever removes OmniRoute's own
+// entries; Ollama worker endpoints are left untouched.
+func removeOmnirouteEndpointsFn(hosts []string) func([]endpointEntry) []endpointEntry {
+	names := map[string]bool{"omniroute": true}
+	hostSet := map[string]bool{}
+	for _, h := range hosts {
+		names["omniroute-"+sanitizeHostLabel(h)] = true
+		hostSet[h] = true
+	}
+	return func(eps []endpointEntry) []endpointEntry {
+		var out []endpointEntry
+		for _, e := range eps {
+			if names[e.Name] {
+				continue
+			}
+			if e.Type == "openai" && hostSet[hostFromURL(e.URL)] && strings.Contains(e.URL, ":"+omniroutePort) {
+				continue
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+}
+
+// deregisterOmnirouteCmd removes OmniRoute's own Olla endpoint(s) from the gateway
+// once the service is fully removed, so a dead openai endpoint isn't left behind
+// for Olla to health-check. Best-effort: the outcome is surfaced via a notice.
+func deregisterOmnirouteCmd(gwHost, user, pass string, hosts []string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := ApplyEndpointChange(gwHost, user, pass, removeOmnirouteEndpointsFn(hosts)); err != nil {
+			return notifyMsg("omniroute endpoint left in place: " + err.Error())
+		}
+		return notifyMsg("omniroute endpoint de-registered from the gateway")
+	}
 }
 
 // omnirouteHosts returns every worker OmniRoute was deployed on, falling back to
