@@ -42,7 +42,7 @@ func (m *model) refreshUpdateList() {
 	items := []list.Item{
 		updateItem{"Update local machine", "download + run the latest installer for this OS", uaLocal},
 		updateItem{"Update gateway (Olla)", "ssh to the gateway and reinstall the latest Olla", uaGateway},
-		updateItem{"Update agents", "upgrade Crush, OpenClaw, Hermes, and Nanoclaw containers", uaAgents},
+		updateItem{"Update agents", "upgrade Crush, OpenClaw, Hermes, Nanoclaw, and OmniRoute containers", uaAgents},
 		updateItem{"Update image", "change the image used for new deployments", uaImage},
 		updateItem{"Update OS", "pick hosts, then run OS package updates over ssh", uaOS},
 		updateItem{"Update all", "OS + agents + Olla + Ollama on every managed host", uaAll},
@@ -203,6 +203,12 @@ func (m *model) updateAgentsPlan() tea.Cmd {
 			script: nanoclawUpdateScript(),
 		})
 	}
+	for _, host := range m.omnirouteHosts() {
+		steps = append(steps, updateStep{
+			title: "Update OmniRoute on " + host, host: host, user: user, pass: m.sshPass,
+			script: omnirouteUpdateScript(),
+		})
+	}
 	if len(steps) == 0 {
 		m.notice = "no agent hosts known — connect and refresh the pool first"
 		return nil
@@ -297,6 +303,12 @@ func (m *model) updateAgentsSteps() []updateStep {
 		steps = append(steps, updateStep{
 			title: "Update Nanoclaw containers on " + host, host: host, user: user, pass: m.sshPass,
 			script: nanoclawUpdateScript(),
+		})
+	}
+	for _, host := range m.omnirouteHosts() {
+		steps = append(steps, updateStep{
+			title: "Update OmniRoute on " + host, host: host, user: user, pass: m.sshPass,
+			script: omnirouteUpdateScript(),
 		})
 	}
 	return steps

@@ -1465,12 +1465,12 @@ func (m *model) startAgent(a agentDef, act, host string) tea.Cmd {
 		if a.name == "Crush" {
 			return localCrushCmd(m.crushConfigJSON(), "", a.name, "")
 		}
-		return localLaunchCmd(loginShell(a.cli), a.name)
+		return localLaunchCmd(agentOpenCmd(a), a.name)
 	}
 	if a.name == "Crush" {
 		return crushCmd(m.sshUser, host, m.sshPass, m.crushConfigJSON(), "", a.name, "")
 	}
-	return prepAgentCmd(m.sshUser, host, m.sshPass, loginShell(a.cli), a.name)
+	return prepAgentCmd(m.sshUser, host, m.sshPass, agentOpenCmd(a), a.name)
 }
 
 func (m *model) deleteSelectedVM() tea.Cmd {
