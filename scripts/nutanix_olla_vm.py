@@ -76,7 +76,8 @@ OLLA_PORT = 40114
 OLLAMA_PORT = 11434
 
 GIB = 1024 ** 3
-REMOTE_DIR = Path(__file__).resolve().parent / "remote"
+SCRIPTS_DIR = Path(__file__).resolve().parent
+REMOTE_DIR = SCRIPTS_DIR / "remote"
 STATE_DIR = Path.home() / ".oilsand-ai-gateway"
 STATE_FILE = STATE_DIR / "state.json"
 
@@ -406,12 +407,20 @@ def vm_summary(vm: dict) -> dict:
 
 
 # --- cloud-init + VM body ---------------------------------------------------
-def render_cloud_init(hostname: str, username: str, password: str) -> str:
+def render_cloud_init(hostname: str, username: str, password: str, ssh_pubkey: str = "") -> str:
     tmpl = (REMOTE_DIR / "cloud-init.rocky.yaml.tmpl").read_text()
+    # Authorizing the key at first boot (rather than appending it over SSH after
+    # the fact) means no operation ever needs the guest password. When no key is
+    # supplied the placeholder line is dropped entirely, so the users: block
+    # stays valid YAML.
+    key_block = ""
+    if ssh_pubkey.strip():
+        key_block = "    ssh_authorized_keys:\n      - " + ssh_pubkey.strip() + "\n"
     return (
         tmpl.replace("{{HOSTNAME}}", hostname)
         .replace("{{USERNAME}}", username)
         .replace("{{PASSWORD}}", password)
+        .replace("{{SSH_AUTHORIZED_KEYS}}\n", key_block)
     )
 
 
@@ -662,7 +671,8 @@ def provision_vm(pc: PrismClient, args: argparse.Namespace, vm_name: str) -> dic
     log(f"cluster '{args.cluster_name}' -> {cluster_ext_id}")
     log(f"subnet '{args.subnet_name}' -> {subnet_ext_id}")
 
-    cloud_init = render_cloud_init(vm_name, args.vm_user, args.vm_password)
+    cloud_init = render_cloud_init(vm_name, args.vm_user, args.vm_password,
+                                   getattr(args, "ssh_pubkey", "") or "")
     body = build_vm_body(
         name=vm_name,
         cluster_ext_id=cluster_ext_id,
@@ -698,6 +708,32 @@ def provision_vm(pc: PrismClient, args: argparse.Namespace, vm_name: str) -> dic
     return {"vm_ext_id": vm_ext_id, "ip": ip, "name": vm_name}
 
 
+def install_tui_on_guest(ssh: Ssh) -> bool:
+    """Install the oilsand-tui on the guest as the unprivileged VM user, so an
+    operator can SSH into the gateway and manage the pool from the box itself.
+
+    Reuses scripts/install.sh (the same one-line installer users run locally)
+    rather than duplicating release-download logic. Runs unprivileged so the
+    binary lands in the user's ~/.oilsand-ai-gateway; the installer escalates
+    with `sudo -n` on its own for the optional system packages, which the
+    cloud-init passwordless-sudo rule allows.
+    """
+    installer = SCRIPTS_DIR / "install.sh"
+    if not installer.exists():
+        log(f"skipping oilsand-tui install: {installer} not found")
+        return False
+    remote = "/tmp/install-oilsand-tui.sh"
+    log("installing the oilsand-tui on the gateway")
+    # Normalize to LF so the guest's shell doesn't choke on Windows CRLF endings.
+    text = installer.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    ssh.put_text(text, remote)
+    rc, _out, _err = ssh.run(f"chmod +x {remote} && sh {remote}")
+    if rc != 0:
+        log(f"warning: oilsand-tui install returned {rc}; the gateway itself is unaffected")
+        return False
+    return True
+
+
 def ssh_install(ip: str, args: argparse.Namespace, script_name: str, remote_args: str = "") -> Ssh:
     ssh = Ssh(ip, args.vm_user, args.vm_password)
     ssh.connect()
@@ -727,6 +763,10 @@ def pattern_a(pc: PrismClient, args: argparse.Namespace) -> None:
 
 def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id: str | None = None) -> None:
     ssh = ssh_install(ip, args, "install-olla.sh")
+    # Ship the TUI alongside the gateway so the box is self-managing.
+    tui_installed = False
+    if not getattr(args, "no_install_tui", False):
+        tui_installed = install_tui_on_guest(ssh)
     # Readiness checks.
     active_rc, active_out, _ = ssh.run("systemctl is-active olla", stream=False)
     models_rc, models_out, _ = ssh.run(
@@ -755,12 +795,15 @@ def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
         "olla_url": olla_url,
         "olla_service_active": active_out.strip() == "active",
         "olla_http_ready": models_rc == 0,
+        "oilsand_tui_installed": tui_installed,
     }
     print("\n=== Pattern A report ===")
     print(json.dumps(report, indent=2))
     if not report["olla_service_active"]:
         fatal("Olla service is not active")
     log("Pattern A complete: Olla is installed and serving.")
+    if tui_installed:
+        log(f"manage it from the gateway: ssh {args.vm_user}@{ip} then run oilsand-tui")
 
 
 # --- image seeding ----------------------------------------------------------
@@ -1028,6 +1071,9 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--disk-gib", type=int, default=DEFAULT_DISK_GIB)
     p.add_argument("--vm-user", default=DEFAULT_VM_USER)
     p.add_argument("--vm-password", default=DEFAULT_VM_PASSWORD)
+    p.add_argument("--ssh-pubkey", default=os.environ.get("OILSAND_SSH_PUBKEY", ""),
+                   help="Public key (authorized_keys line) to authorize for --vm-user at first "
+                        "boot, so later SSH needs no password (or env OILSAND_SSH_PUBKEY)")
     p.add_argument("--ip-prefix", default=os.environ.get("OILSAND_IP_PREFIX", ""),
                    help="Prefer a learned IP with this subnet prefix (default: take the first learned IP; "
                         "or set OILSAND_IP_PREFIX)")
@@ -1048,6 +1094,9 @@ def main() -> int:
 
     pa = sub.add_parser("pattern-a", help="Provision a Rocky VM and install Olla")
     add_common_args(pa)
+    pa.add_argument("--no-install-tui", action="store_true",
+                    help="Skip installing the oilsand-tui on the gateway (it is installed by "
+                         "default so the gateway can be managed from the box itself)")
 
     pb = sub.add_parser("pattern-b", help="Provision a Rocky VM, install Ollama + model, register with Olla")
     add_common_args(pb)

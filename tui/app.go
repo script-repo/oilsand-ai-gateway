@@ -236,6 +236,7 @@ type model struct {
 	procCh           chan ProcEvent
 	procBusy         bool
 	localOllaPending bool        // the running proc is a local Olla install; connect on success
+	probingLocal     bool        // startup probe for a local Olla is in flight; hold off the Connect form
 	batch            deployBatch // active multi-worker parallel deploy, if any
 	logLines         []string
 
@@ -449,6 +450,10 @@ func newModel(gateway, sshUser, sshPass string) model {
 	if m.defModel != "" {
 		m.chatModel = m.defModel
 	}
+	// With no gateway configured, Init() probes for a local Olla. Mark that in
+	// flight so the first WindowSizeMsg doesn't open the Connect form over a
+	// probe that is about to succeed.
+	m.probingLocal = m.gateway == ""
 
 	// The Update list is a dense menu (7 fixed actions), so give it a compact
 	// single-line delegate — the default 3-line delegate would paginate after
@@ -491,9 +496,11 @@ func (m model) Init() tea.Cmd {
 	if m.gateway != "" {
 		cmds = append(cmds, connectCmd(m.gateway))
 	} else {
-		// First launch (or a cleared config): prompt for the gateway + SSH
-		// credentials instead of shipping hardcoded lab values.
-		cmds = append(cmds, func() tea.Msg { return firstRunMsg{} })
+		// Nothing configured yet. The TUI is often run on the gateway box
+		// itself (it ships there with the deploy), so look for an Olla on this
+		// machine before asking anyone to type a URL. The probe falls back to
+		// firstRunMsg, which opens the Connect form as before.
+		cmds = append(cmds, localOllaProbeCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -502,9 +509,15 @@ func (m model) Init() tea.Cmd {
 
 type tickMsg time.Time
 
-// firstRunMsg is emitted once at startup when no gateway is configured, so the
-// connection modal opens automatically for the user to enter their details.
+// firstRunMsg is emitted once at startup when no gateway is configured and no
+// local Olla was found, so the connection modal opens automatically for the
+// user to enter their details.
 type firstRunMsg struct{}
+
+// localOllaFoundMsg reports that the startup probe found an Olla gateway
+// running on this machine, so the TUI can connect to it without being
+// configured by hand.
+type localOllaFoundMsg struct{ gateway string }
 type connectedMsg struct {
 	gateway string
 	info    VersionInfo

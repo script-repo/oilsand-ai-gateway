@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -19,6 +20,45 @@ func connectCmd(gateway string) tea.Cmd {
 		c := NewOllaClient(gateway)
 		v, err := c.Version()
 		return connectedMsg{gateway: gateway, info: v, err: err}
+	}
+}
+
+// localOllaCandidates lists the URLs a gateway on this machine could answer on,
+// most preferred first. The external (default-route) address comes before
+// loopback so the URL we save is also reachable from other hosts.
+func localOllaCandidates() []string {
+	out := make([]string, 0, 2)
+	seen := map[string]bool{}
+	for _, url := range []string{LocalOllaURL(), "http://127.0.0.1:" + LocalOllaPort} {
+		if !seen[url] {
+			seen[url] = true
+			out = append(out, url)
+		}
+	}
+	return out
+}
+
+// firstRespondingOlla returns the first URL that answers as an Olla gateway, or
+// "" if none do.
+func firstRespondingOlla(urls []string, timeout time.Duration) string {
+	for _, url := range urls {
+		if err := NewOllaClient(url).Probe(timeout); err == nil {
+			return url
+		}
+	}
+	return ""
+}
+
+// localOllaProbeCmd looks for an Olla gateway already running on this machine,
+// so running the TUI on the gateway box needs no manual configuration. Returns
+// firstRunMsg when nothing answers, which opens the Connect form for a remote
+// gateway.
+func localOllaProbeCmd() tea.Cmd {
+	return func() tea.Msg {
+		if url := firstRespondingOlla(localOllaCandidates(), 2*time.Second); url != "" {
+			return localOllaFoundMsg{gateway: url}
+		}
+		return firstRunMsg{}
 	}
 }
 
@@ -137,13 +177,6 @@ func nextNameCmd(cfg *PCConfig, role string) tea.Cmd {
 	return func() tea.Msg {
 		name, err := NextName(cfg, role)
 		return nextNameMsg{name: name, err: err}
-	}
-}
-
-func sshAddCmd(host, user, pass string, e endpointEntry) tea.Cmd {
-	return func() tea.Msg {
-		msg, err := ApplyEndpointChange(host, user, pass, addEndpointFn(e))
-		return sshResultMsg{msg: msg, err: err}
 	}
 }
 
@@ -352,19 +385,19 @@ func hostFromURL(u string) string {
 
 // tuiSettings is the small persisted state in ~/.oilsand-ai-gateway/tui.json.
 type tuiSettings struct {
-	Token         string            `json:"olla_token"`
-	DefaultModel  string            `json:"default_model"`
-	Gateway       string            `json:"gateway"`      // Olla gateway URL (set on first launch)
-	SSHUser       string            `json:"ssh_user"`     // SSH user for the gateway VM
-	SSHPass       string            `json:"ssh_password"` // SSH password for the gateway VM
-	Deploy        deploySettings    `json:"deploy"`
-	PC            pcOverride        `json:"prism_central"`
+	Token         string              `json:"olla_token"`
+	DefaultModel  string              `json:"default_model"`
+	Gateway       string              `json:"gateway"`      // Olla gateway URL (set on first launch)
+	SSHUser       string              `json:"ssh_user"`     // SSH user for the gateway VM
+	SSHPass       string              `json:"ssh_password"` // SSH password for the gateway VM
+	Deploy        deploySettings      `json:"deploy"`
+	PC            pcOverride          `json:"prism_central"`
 	Agents        map[string]string   `json:"agents"`      // agent name -> most recent deployed host
 	AgentHosts    map[string][]string `json:"agent_hosts"` // agent name -> every host it was deployed on
-	Hermes        hermesSettings    `json:"hermes"`
-	CustomDeploys []customDeploy    `json:"custom_deploys"` // user-defined deployment types
-	CustomSeeded  bool              `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
-	VMImages      map[string]string `json:"vm_images"`      // VM name -> source image name
+	Hermes        hermesSettings      `json:"hermes"`
+	CustomDeploys []customDeploy      `json:"custom_deploys"` // user-defined deployment types
+	CustomSeeded  bool                `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
+	VMImages      map[string]string   `json:"vm_images"`      // VM name -> source image name
 }
 
 // customDeploy is a user-defined Nutanix deployment type: a friendly name plus
@@ -508,8 +541,6 @@ func saveSettings(path string, s tuiSettings) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
-func loadToken(path string) string { return loadSettings(path).Token }
-
 func saveToken(path, token string) error {
 	s := loadSettings(path)
 	s.Token = token
@@ -526,8 +557,6 @@ func saveConnect(path, gateway, sshUser, sshPass string) error {
 	s.SSHPass = sshPass
 	return saveSettings(path, s)
 }
-
-func loadDefaultModel(path string) string { return loadSettings(path).DefaultModel }
 
 func saveDefaultModel(path, model string) error {
 	s := loadSettings(path)

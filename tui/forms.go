@@ -932,10 +932,10 @@ func (m *model) onFormComplete() tea.Cmd {
 }
 
 // deployFlags maps the persisted VM template + image settings onto the Python
-// helper's CLI flags (shared across pattern-a/pattern-b).
+// helper's CLI flags (shared across pattern-a/pattern-b/pattern-custom).
 func (m *model) deployFlags() []string {
 	d := withDeployDefaults(m.deployCfg)
-	return []string{
+	flags := []string{
 		"--image-name", d.ImageName,
 		"--cluster-name", d.ClusterName,
 		"--subnet-name", d.SubnetName,
@@ -946,4 +946,12 @@ func (m *model) deployFlags() []string {
 		"--vm-user", d.VMUser,
 		"--vm-password", d.VMPassword,
 	}
+	// Authorize the managed key in the guest's cloud-init so every later SSH
+	// (console, agents, updates) is key-based. A failure here is not fatal: the
+	// guest still accepts the password, and EnsureKeyAuth installs the key on
+	// first use as before.
+	if _, authLine, err := ensureLocalKey(); err == nil && authLine != "" {
+		flags = append(flags, "--ssh-pubkey", authLine)
+	}
+	return flags
 }

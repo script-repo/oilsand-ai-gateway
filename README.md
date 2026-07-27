@@ -213,12 +213,17 @@ Sections:
 
 ### First launch
 
-The first time you run the TUI with no saved configuration it opens the **Connect** form
-automatically and asks for your Olla gateway URL and SSH credentials — nothing is hardcoded.
+With no saved configuration the TUI first looks for an Olla gateway **on the machine it is
+running on** (`:40114`, the default-route address first, then loopback). If it finds one it
+connects straight to it and saves that URL — so SSHing into a gateway VM and running
+`oilsand-tui` needs no setup at all. Only when nothing is listening locally does it open the
+**Connect** form and ask for a remote gateway URL and SSH credentials; nothing is hardcoded.
+
 Those values are saved to `~/.oilsand-ai-gateway/tui.json` (mode `0600`) and reused on later
-runs. Gateway URL, SSH user and password can also be supplied up front via the `OLLA_GATEWAY`,
-`OLLA_SSH_USER` and `OLLA_SSH_PASSWORD` environment variables (flags/env take precedence over the
-saved values). The VM password for Nutanix deploys is entered in the **Nutanix** settings form
+runs, so the local probe only happens while the TUI is unconfigured. Gateway URL, SSH user and
+password can also be supplied up front via the `OLLA_GATEWAY`, `OLLA_SSH_USER` and
+`OLLA_SSH_PASSWORD` environment variables (flags/env take precedence over the saved values, and
+skip the probe). The VM password for Nutanix deploys is entered in the **Nutanix** settings form
 (`e`) — deploys are blocked until it is set.
 
 ### Nanoclaw — containerized agent instances on the workers
@@ -355,9 +360,20 @@ The TUI's Nutanix section drives `scripts/nutanix_olla_vm.py`, which can also be
 It provisions a Rocky Linux VM through the Prism Central v4 API with a cloud-init script, then
 SSHes in to install software natively as systemd services.
 
-* Pattern A: provision the VM and install Olla (the gateway/load balancer).
+* Pattern A: provision the VM, install Olla (the gateway/load balancer), and install the
+  **oilsand-tui on the gateway itself** so you can `ssh rocky@<gateway>` and run `oilsand-tui`
+  to manage the pool from that box. It auto-connects to the local Olla on launch. This uses the
+  same `scripts/install.sh` you'd run locally; pass `--no-install-tui` to skip it. A failed TUI
+  install is reported but never fails the deploy — the gateway itself is unaffected.
 * Pattern B: provision the VM, install Ollama and pull a model (default `rnj-1`), then
   register the new worker with an existing Olla instance (defaults to the Pattern A VM).
+
+**SSH keys are set up at first boot.** Every deploy passes the TUI's managed public key
+(`~/.oilsand-ai-gateway/keys/id_ed25519.pub`, created on demand) into the guest's cloud-init as
+an `ssh_authorized_keys` entry for the VM user. Console sessions, agent installs and the Update
+actions therefore authenticate by key from the moment the VM comes up — no password prompts. On
+the CLI, pass the key with `--ssh-pubkey "$(cat ~/.ssh/id_ed25519.pub)"` or set
+`OILSAND_SSH_PUBKEY`; omit it and the guest simply falls back to password auth as before.
 
 Install dependencies and set Prism Central credentials:
 

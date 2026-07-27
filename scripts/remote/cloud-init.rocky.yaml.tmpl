@@ -1,8 +1,9 @@
 #cloud-config
 # Cloud-init userData for the Rocky Linux generic cloud image.
-# Placeholders ({{HOSTNAME}}, {{USERNAME}}, {{PASSWORD}}) are substituted by
-# nutanix_olla_vm.py before the document is base64-encoded into the VM guest
-# customization payload.
+# The HOSTNAME, USERNAME, PASSWORD and SSH_AUTHORIZED_KEYS placeholders below
+# are substituted by nutanix_olla_vm.py before the document is base64-encoded
+# into the VM guest customization payload. Don't write those names in double
+# braces here in the comments — they would be substituted too.
 hostname: {{HOSTNAME}}
 fqdn: {{HOSTNAME}}
 preserve_hostname: false
@@ -13,6 +14,8 @@ disable_root: false
 
 # Keep the image's built-in default user (e.g. rocky) and add the requested one
 # with passwordless sudo so the installer scripts can run sudo without a TTY.
+# The authorized key (when supplied) is what makes every later SSH — console
+# sessions, agent installs, updates — key-based instead of password-based.
 users:
   - default
   - name: {{USERNAME}}
@@ -20,6 +23,7 @@ users:
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     shell: /bin/bash
     lock_passwd: false
+{{SSH_AUTHORIZED_KEYS}}
 
 chpasswd:
   expire: false

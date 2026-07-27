@@ -23,7 +23,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.form != nil {
 		switch msg.(type) {
 		case tickMsg, spinner.TickMsg, progress.FrameMsg,
-			connectedMsg, statusMsg, modelsMsg, vmsMsg,
+			connectedMsg, localOllaFoundMsg, statusMsg, modelsMsg, vmsMsg,
 			chatEvMsg, pullEvMsg, procEvMsg, nextNameMsg,
 			sshResultMsg, endpointsMsg, notifyMsg, tea.WindowSizeMsg,
 			hubDialedMsg, hubEvMsg, hubDeployedMsg, nanoclawInstancesMsg,
@@ -40,7 +40,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyLayout(msg.Width, msg.Height)
 		if !m.ready {
 			m.ready = true
-			if m.gateway == "" && m.form == nil {
+			// Don't open the Connect form on top of an in-flight local probe;
+			// firstRunMsg opens it if the probe comes back empty.
+			if m.gateway == "" && m.form == nil && !m.probingLocal {
 				return m, m.openConnect()
 			}
 		}
@@ -68,8 +70,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case firstRunMsg:
+		m.probingLocal = false
 		m.notice = "welcome — enter your Olla gateway URL and SSH credentials to get started"
 		return m, m.openConnect()
+
+	case localOllaFoundMsg:
+		m.probingLocal = false
+		m.gateway = msg.gateway
+		// Persist so later runs connect straight away, and so the SSH creds
+		// captured later attach to this gateway.
+		_ = saveConnect(m.tokFile, msg.gateway, m.sshUser, m.sshPass)
+		m.notice = "found a local Olla gateway — connecting to " + msg.gateway
+		return m, connectCmd(msg.gateway)
 
 	case connectedMsg:
 		if msg.err != nil {

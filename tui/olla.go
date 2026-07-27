@@ -91,6 +91,16 @@ func (c *OllaClient) Version() (VersionInfo, error) {
 	return v, err
 }
 
+// Probe reports whether an Olla gateway answers on this base URL within d. It
+// backs the startup "is a gateway already running here?" check, so the timeout
+// is short: a machine with no gateway must not stall the UI.
+func (c *OllaClient) Probe(d time.Duration) error {
+	ctx, cancel := c.ctx(d)
+	defer cancel()
+	var v VersionInfo
+	return c.getJSON(ctx, "/version", &v)
+}
+
 func (c *OllaClient) Status() (Status, error) {
 	ctx, cancel := c.ctx(10 * time.Second)
 	defer cancel()
