@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,10 +106,21 @@ func TestRemoveNanoclawOpensInstancePicker(t *testing.T) {
 
 func TestNanoclawConnectRemoteCmd(t *testing.T) {
 	got := nanoclawConnectRemoteCmd("nanoclaw-03")
-	for _, want := range []string{"docker exec -it", "'nanoclaw-03'", "tsx src/cli/client.ts"} {
+	for _, want := range []string{"docker exec -it", "'nanoclaw-03'", "bash --rcfile"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("connect cmd missing %q: %s", want, got)
 		}
+	}
+	// ncl is a one-shot admin client: it sends a single frame over the control
+	// socket and exits, so using it as the session command makes the console
+	// die the instant it opens. The session must be an interactive shell.
+	for _, bad := range []string{"tsx src/cli/client.ts", "pnpm exec tsx"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("connect cmd invokes the one-shot ncl client (%q): %s", bad, got)
+		}
+	}
+	if enc := base64.StdEncoding.EncodeToString([]byte(nanoclawShellRC)); !strings.Contains(got, enc) {
+		t.Error("connect cmd does not stage the shell rc")
 	}
 }
 

@@ -248,13 +248,24 @@ Deploying (press `d` on Nanoclaw in the **Agents** section):
 4. Every container is pointed at the **Olla OpenAI endpoint** (via `OPENAI_BASE_URL` /
    `NANOCLAW_MODEL` env vars), so all instances load-balance across the whole worker pool,
    and receives the **Agent Hub** coordinates (`OILSAND_HUB_HOST`, `OILSAND_HUB_PORT`,
-   `OILSAND_HUB_NAME`) so hub-aware agents can join the shared channel.
+   `OILSAND_HUB_NAME`). A small hub bridge baked into the image reads those on startup and
+   joins the shared channel, so instances appear in the **Hub** roster on their own.
 
 Deploying again — to the same worker or a different one — simply adds more instances; names
 never collide. Opening Nanoclaw (`enter`/`o`) refreshes the live inventory and lets you pick
-a **running instance** to drop into: it opens an interactive `ncl` session **inside that
-container** (`docker exec -it … tsx src/cli/client.ts`, which talks to NanoClaw's in-container
-control socket), the same interactive surface Hermes and OpenClaw give — not just a log tail.
+a **running instance** to drop into: it opens an **interactive shell inside that container**
+with NanoClaw's `ncl` admin CLI on `PATH`, plus a short crib sheet of common commands.
+
+> `ncl` is a one-shot admin client — each call sends a single request frame over the
+> container's control socket (`data/ncl.sock`) and exits. That is why the session is a shell
+> rather than `ncl` itself: running `ncl` as the session command returns immediately and the
+> console looks like it died the moment it opened. From the shell, run `ncl help`,
+> `ncl groups list`, `ncl sessions list`, `ncl tasks list`, and so on.
+
+Before handing over the terminal the TUI checks the container is actually running. If it
+isn't, you get a notice naming the instance, its state and its last log line, instead of a
+session that opens and instantly closes with the reason already scrolled away.
+
 `i` in the Agents section shows all instances across every worker at once (including stopped
 ones), and remains the place to check status or read logs by hand (`sudo docker logs …`).
 **Update ▸ Update agents** rebuilds the image against upstream and **recreates** the
@@ -268,7 +279,9 @@ deleting the matching state volume. Or manage them by hand on the worker:
 ```bash
 sudo docker ps --filter name=nanoclaw-            # list instances
 sudo docker logs -f nanoclaw-02                   # follow one instance
-sudo docker exec -it nanoclaw-02 pnpm exec tsx src/cli/client.ts   # interactive ncl session
+sudo docker exec -it nanoclaw-02 bash             # shell inside it (ncl is on PATH)
+sudo docker exec -it nanoclaw-02 ncl groups list  # or run one ncl command directly
+sudo docker exec nanoclaw-02 cat /var/log/oilsand-hub-bridge.log   # hub join/retry log
 sudo docker rm -f nanoclaw-02                     # remove an instance
 sudo docker volume rm oilsand-nanoclaw-02         # …and its state
 ```
@@ -306,10 +319,23 @@ host on the LAN:
 
 In the TUI, the Hub feed shows each message with its sender (colored per agent) and timestamp;
 join/leave events render as dim system lines and the online roster is shown under the feed.
-Type to broadcast, or start a line with `@nanoclaw-01 ` to address a single agent. Nanoclaw
-containers receive `OILSAND_HUB_HOST` / `OILSAND_HUB_PORT` / `OILSAND_HUB_NAME` at deploy
-time, so hub-aware agent builds know exactly where to join. The channel is an open party line
-for a trusted LAN — there is no auth or encryption, so don't put secrets on it.
+Type to broadcast, or start a line with `@nanoclaw-01 ` to address a single agent.
+
+**How Nanoclaw instances join.** Upstream NanoClaw knows nothing about this hub, so passing
+`OILSAND_HUB_*` into a container achieves nothing by itself. The TUI's Nanoclaw image
+therefore bakes in a small dependency-free Node bridge that reads those variables at startup,
+sends the `hello` frame, keeps the connection alive, reconnects with backoff, and answers a
+direct message with a status line. It is a **presence bridge**: it puts the instance on the
+roster and proves it is alive — it does not pipe the channel into the agent's reasoning. Use
+the in-container `ncl` CLI for actual administration.
+
+If the roster is empty: deploy the hub with `ctrl+d`, then **re-deploy Nanoclaw** so the image
+is rebuilt with the bridge and existing containers are recreated on it. `sudo docker exec
+<name> cat /var/log/oilsand-hub-bridge.log` on the worker shows the join attempts, and the
+worker must be able to reach the gateway on TCP 40117.
+
+The channel is an open party line for a trusted LAN — there is no auth or encryption, so
+don't put secrets on it.
 
 ### Install Olla locally (no Nutanix VM)
 

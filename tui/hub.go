@@ -490,7 +490,7 @@ func (m model) viewHub() string {
 	head := labelStyle.Render("Agent Hub") +
 		dimStyle.Render("  "+orDefault(m.hubAddr(), "(no gateway)")+"  ") + state
 
-	peers := "no agents on the channel — deployed Nanoclaw instances receive the hub address via OILSAND_HUB_* env"
+	peers := "no agents on the channel — ctrl+d installs the hub here, then (re)deploy Nanoclaw so its instances join"
 	if others := removeStr(append([]string(nil), m.hubPeers...), m.hubName); len(others) > 0 {
 		peers = "on channel: " + strings.Join(others, " · ")
 	}

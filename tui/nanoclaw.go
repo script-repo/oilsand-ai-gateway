@@ -57,13 +57,102 @@ RUN git clone --depth 1 https://github.com/qwibitai/nanoclaw /opt/nanoclaw
 WORKDIR /opt/nanoclaw
 RUN pnpm install --frozen-lockfile || pnpm install
 RUN pnpm run build
+# Put the ncl admin CLI on PATH. Upstream's setup normally symlinks bin/ncl
+# into ~/.local/bin; we do it here so an interactive shell in this container
+# can just run "ncl groups list" without knowing the project layout.
+RUN chmod +x bin/ncl 2>/dev/null || true
+RUN ln -sf /opt/nanoclaw/bin/ncl /usr/local/bin/ncl
 # A fresh clone has no upgrade marker, and NanoClaw's upgrade tripwire refuses
 # to start without one (it assumes an unsanctioned git pull). Recording the
 # just-built version marks this image as a sanctioned install. Guarded so
 # older upstream revisions without the tripwire still build.
 RUN [ ! -f scripts/upgrade-state.ts ] || pnpm exec tsx scripts/upgrade-state.ts set
-# Entrypoint: bring up the inner dockerd, wait until it answers, then hand
-# off to CMD. The cgroup shuffle mirrors the official docker:dind entrypoint —
+# Agent Hub bridge. Upstream NanoClaw knows nothing about the Oilsand hub
+# protocol (hub.go), so passing OILSAND_HUB_* into the container achieves
+# nothing on its own — without this process no instance ever appears on the
+# channel. Node only, no dependencies; .cjs keeps it CommonJS regardless of
+# any package.json "type" nearby.
+COPY <<'HUBBRIDGE_EOF' /usr/local/bin/oilsand-hub-bridge.cjs
+// Registers this Nanoclaw container on the Oilsand Agent Hub and keeps the
+// connection up, so the TUI's Hub tab lists it as a peer. Reconnects with
+// backoff; answers direct messages with a short liveness/status line.
+const net = require('net');
+const os = require('os');
+
+const HOST = process.env.OILSAND_HUB_HOST || '';
+const PORT = parseInt(process.env.OILSAND_HUB_PORT || '40117', 10);
+const NAME = process.env.OILSAND_HUB_NAME || 'nanoclaw';
+const PING_MS = 30000;
+const BACKOFF_MAX = 30000;
+
+// No hub configured: exit quietly so the entrypoint stays clean.
+if (!HOST) { process.exit(0); }
+
+// The hub may hand back a de-duplicated name (e.g. "nanoclaw-01-2"); track it
+// so we can tell which direct messages are addressed to us.
+let assigned = NAME;
+let backoff = 1000;
+
+function log(msg) {
+  console.log('[hub-bridge] ' + new Date().toISOString() + ' ' + msg);
+}
+
+function statusText() {
+  return assigned + ' is online (NanoClaw container on host ' + os.hostname() +
+    '). This is a presence bridge: for agent administration use ncl inside ' +
+    'the container (TUI: Agents > Nanoclaw > connect).';
+}
+
+function connect() {
+  const sock = net.createConnection({ host: HOST, port: PORT });
+  let buf = '';
+  let ping = null;
+  let settled = false;
+
+  const teardown = function () {
+    if (settled) { return; }
+    settled = true;
+    if (ping) { clearInterval(ping); ping = null; }
+    log('disconnected; retrying in ' + backoff + 'ms');
+    setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, BACKOFF_MAX);
+  };
+
+  sock.on('connect', function () {
+    backoff = 1000;
+    log('connected to ' + HOST + ':' + PORT + ' as ' + NAME);
+    sock.write(JSON.stringify({ type: 'hello', name: NAME, kind: 'agent' }) + '\n');
+    ping = setInterval(function () {
+      sock.write(JSON.stringify({ type: 'ping' }) + '\n');
+    }, PING_MS);
+  });
+
+  sock.on('data', function (chunk) {
+    buf += chunk.toString('utf8');
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      if (!line.trim()) { continue; }
+      let f;
+      try { f = JSON.parse(line); } catch (e) { continue; }
+      if (f.type === 'welcome') {
+        assigned = f.name || NAME;
+        log('joined channel as ' + assigned);
+      } else if (f.type === 'msg' && f.to === assigned && f.from && f.from !== assigned) {
+        sock.write(JSON.stringify({ type: 'msg', to: f.from, text: statusText() }) + '\n');
+      }
+    }
+  });
+
+  sock.on('error', function (err) { log('socket error: ' + err.message); });
+  sock.on('close', teardown);
+}
+
+connect();
+HUBBRIDGE_EOF
+# Entrypoint: bring up the inner dockerd, start the hub bridge, then hand off
+# to CMD. The cgroup shuffle mirrors the official docker:dind entrypoint —
 # on cgroup v2 dockerd can only enable controllers for child cgroups once the
 # root cgroup's processes have moved into a leaf.
 COPY <<'ENTRYPOINT_EOF' /usr/local/bin/nanoclaw-entrypoint.sh
@@ -86,6 +175,12 @@ until docker info >/dev/null 2>&1; do
   fi
   sleep 1
 done
+# Join the Agent Hub, if one was configured at deploy time. Backgrounded and
+# non-fatal: an unreachable hub must never stop NanoClaw from starting.
+if [ -n "${OILSAND_HUB_HOST:-}" ]; then
+  echo "[entrypoint] joining Agent Hub at ${OILSAND_HUB_HOST}:${OILSAND_HUB_PORT:-40117} as ${OILSAND_HUB_NAME:-nanoclaw}"
+  node /usr/local/bin/oilsand-hub-bridge.cjs >> /var/log/oilsand-hub-bridge.log 2>&1 &
+fi
 exec "$@"
 ENTRYPOINT_EOF
 RUN chmod +x /usr/local/bin/nanoclaw-entrypoint.sh
@@ -122,9 +217,9 @@ echo "[deploy] docker: $(sudo docker --version)"
 // nanoclawDeployScript builds the install/run bootstrap for `instances`
 // Nanoclaw containers on one worker: Docker bootstrap, a one-time image build,
 // then a run loop that picks the next free nanoclaw-NN name so repeated deploys
-// keep adding instances instead of colliding. Each container also receives the
-// Agent Hub coordinates (OILSAND_HUB_HOST/PORT/NAME) so hub-aware agents can
-// join the shared chat channel on the gateway (see hub.go).
+// keep adding instances instead of colliding. Each container receives the Agent
+// Hub coordinates (OILSAND_HUB_HOST/PORT/NAME), which the bridge baked into the
+// image reads on startup to join the shared channel on the gateway (hub.go).
 func (m *model) nanoclawDeployScript(instances int) string {
 	if instances < 1 {
 		instances = 1
@@ -183,15 +278,37 @@ echo "[deploy] started:$started — each instance is isolated in its own contain
 	return b.String()
 }
 
-// nanoclawConnectRemoteCmd is the shell that opens an interactive ncl session
-// inside a specific Nanoclaw container. NanoClaw ships an `ncl` CLI client
-// (package.json bin/scripts → `tsx src/cli/client.ts`) that talks to the
-// in-container control socket (/opt/nanoclaw/data/ncl.sock); running it with a
-// TTY (docker exec -it) gives the same interactive surface Hermes/OpenClaw have,
-// rather than just tailing logs. WORKDIR is already /opt/nanoclaw but we set it
-// explicitly so `pnpm exec` resolves the project regardless of image quirks.
+// nanoclawShellRC is the bash rc for an in-container session: it puts ncl on
+// PATH (for containers from an image built before the symlink existed) and
+// prints a short crib sheet, because ncl is not discoverable by itself.
+const nanoclawShellRC = `[ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
+export PATH="/opt/nanoclaw/bin:$PATH"
+export PS1="nanoclaw:\w\$ "
+cd /opt/nanoclaw 2>/dev/null || true
+echo "NanoClaw container shell. ncl is the admin CLI - each call is one-shot:"
+echo "  ncl help              every resource and verb"
+echo "  ncl groups list       agent groups"
+echo "  ncl sessions list     active sessions"
+echo "  ncl tasks list        scheduled tasks"
+echo "Logs: docker logs (outside) or /var/log/oilsand-hub-bridge.log (hub bridge)."
+echo "exit or ctrl-d returns to the TUI."
+`
+
+// nanoclawConnectRemoteCmd opens an interactive shell inside a Nanoclaw
+// container.
+//
+// It deliberately does NOT run ncl directly. ncl is a one-shot admin client:
+// it sends a single request frame over the container's control socket
+// (data/ncl.sock) and exits, so running it bare as a "session" returns
+// immediately and the console looks like it died on open. An interactive bash
+// with ncl on PATH is the durable surface, and it also survives NanoClaw
+// itself being down — you land in a shell that can show you why.
 func nanoclawConnectRemoteCmd(name string) string {
-	return "sudo docker exec -it -w /opt/nanoclaw '" + shSingle(name) + "' pnpm exec tsx src/cli/client.ts"
+	rc := base64.StdEncoding.EncodeToString([]byte(nanoclawShellRC))
+	// The rc file is staged inside the container, so this works on images
+	// built before the shell helper existed.
+	inner := "echo " + rc + " | base64 -d > /tmp/.oilsand-rc; exec bash --rcfile /tmp/.oilsand-rc -i"
+	return "sudo docker exec -it -w /opt/nanoclaw '" + shSingle(name) + "' bash -c \"" + inner + "\""
 }
 
 // nanoclawRecreateFragment recreates every existing nanoclaw container on the
@@ -246,6 +363,9 @@ func nanoclawConnectCmd(user, host, pass, name string) tea.Cmd {
 		if pass != "" {
 			_, _ = EnsureKeyAuth(host, u, pass)
 		}
+		if err := nanoclawPreflight(host, u, pass, name); err != nil {
+			return notifyMsg(err.Error())
+		}
 		return consoleReadyMsg{user: u, host: host, key: managedKeyPath(), cmd: nanoclawConnectRemoteCmd(name), label: "Nanoclaw " + name}
 	}
 }
@@ -253,6 +373,9 @@ func nanoclawConnectCmd(user, host, pass, name string) tea.Cmd {
 // localNanoclawConnectCmd is nanoclawConnectCmd for a container on this machine.
 func localNanoclawConnectCmd(name string) tea.Cmd {
 	return func() tea.Msg {
+		if err := nanoclawPreflight("", "", "", name); err != nil {
+			return notifyMsg(err.Error())
+		}
 		return consoleReadyMsg{local: true, cmd: nanoclawConnectRemoteCmd(name), label: "Nanoclaw " + name}
 	}
 }
@@ -311,11 +434,11 @@ func nanoclawInstancesCmd(hosts []string, user, pass string) tea.Cmd {
 	}
 }
 
-// runNanoclawPS lists nanoclaw containers on one host: locally when the host is
+// runNanoclawHostCmd runs a shell command on one host: locally when the host is
 // this machine, over SSH otherwise.
-func runNanoclawPS(host, user, pass string) (string, error) {
+func runNanoclawHostCmd(host, user, pass, script string) (string, error) {
 	if isLocalHost(host) {
-		out, err := exec.Command("bash", "-lc", nanoclawPSCmd).CombinedOutput()
+		out, err := exec.Command("bash", "-lc", script).CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("%v: %s", err, lastNonEmptyLine(string(out)))
 		}
@@ -329,11 +452,78 @@ func runNanoclawPS(host, user, pass string) (string, error) {
 		return "", err
 	}
 	defer client.Close()
-	out, err := runSSH(client, nanoclawPSCmd)
+	out, err := runSSH(client, script)
 	if err != nil {
 		return "", fmt.Errorf("%v: %s", err, lastNonEmptyLine(out))
 	}
 	return out, nil
+}
+
+// runNanoclawPS lists nanoclaw containers on one host.
+func runNanoclawPS(host, user, pass string) (string, error) {
+	return runNanoclawHostCmd(host, user, pass, nanoclawPSCmd)
+}
+
+// nanoclawStatusScript reports a container's state ("running", "exited", …) or
+// nothing at all when no such container exists. sudo runs with -n so a host
+// that wants a sudo password fails fast instead of blocking the TUI on a
+// prompt no one can answer.
+func nanoclawStatusScript(name string) string {
+	return "sudo -n docker inspect -f '{{.State.Status}}' '" + shSingle(name) + "' 2>/dev/null || true"
+}
+
+// nanoclawLogsScript returns the tail of a container's log, for explaining why
+// it isn't running.
+func nanoclawLogsScript(name string) string {
+	return "sudo -n docker logs --tail 5 '" + shSingle(name) + "' 2>&1 || true"
+}
+
+// nanoclawStatusError turns an observed container status into the error the
+// operator should see, or nil when the container is attachable. Kept separate
+// from the host round-trip so the wording is testable on its own.
+func nanoclawStatusError(name, where, status, logTail string) error {
+	if where == "" {
+		where = "this host"
+	}
+	switch status {
+	case "running":
+		return nil
+	case "":
+		return fmt.Errorf("no container %s on %s — deploy Nanoclaw again to recreate it", name, where)
+	default:
+		if l := strings.TrimSpace(lastNonEmptyLine(logTail)); l != "" {
+			return fmt.Errorf("%s is %s on %s — last log: %s", name, status, where, truncate(l, 160))
+		}
+		return fmt.Errorf("%s is %s on %s (no logs)", name, status, where)
+	}
+}
+
+// nanoclawPreflight returns nil when the container is up and can be attached
+// to, or an explanatory error otherwise.
+//
+// Without this the console is handed a dead container: docker exec fails in
+// the terminal we just gave away, the screen is restored, and all the operator
+// sees is "session ended" with the real reason already scrolled off. Checking
+// first lets the failure surface as a notice that names the cause.
+func nanoclawPreflight(host, user, pass, name string) error {
+	where := host
+	if where == "" {
+		where = "this host"
+	}
+	out, err := runNanoclawHostCmd(host, user, pass, nanoclawStatusScript(name))
+	if err != nil {
+		return fmt.Errorf("could not check %s on %s: %v", name, where, err)
+	}
+	status := strings.TrimSpace(lastNonEmptyLine(out))
+	if status == "running" {
+		return nil
+	}
+	var logTail string
+	if status != "" {
+		// The container's own last log line is nearly always the real reason.
+		logTail, _ = runNanoclawHostCmd(host, user, pass, nanoclawLogsScript(name))
+	}
+	return nanoclawStatusError(name, where, status, logTail)
 }
 
 // nanoclawRemoveScript deletes the named containers on one host, optionally
