@@ -34,8 +34,8 @@ type updateItem struct {
 }
 
 func (i updateItem) Title() string       { return i.title }
-func (i updateItem) Description() string  { return i.desc }
-func (i updateItem) FilterValue() string  { return i.title }
+func (i updateItem) Description() string { return i.desc }
+func (i updateItem) FilterValue() string { return i.title }
 
 // refreshUpdateList populates the Update section's list with the seven actions.
 func (m *model) refreshUpdateList() {

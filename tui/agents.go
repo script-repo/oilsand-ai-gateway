@@ -402,8 +402,6 @@ func loginShell(cmd string) string {
 	return "bash -lc '" + cmd + "'"
 }
 
-const crushConfigPath = "~/.config/crush/crush.json"
-
 // crushConfigJSON builds a crush.json that registers the Olla gateway as an
 // OpenAI-type provider named "olla" (so model names show through), pointing at
 // the OpenAI-compatible base URL with the configured token and discovered

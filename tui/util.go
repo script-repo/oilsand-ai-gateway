@@ -72,7 +72,7 @@ func orDefault(s, def string) string {
 }
 
 // shSingle escapes a value for safe interpolation inside a single-quoted POSIX
-// shell string: close the quote, emit an escaped quote, reopen ('\'' idiom).
+// shell string: close the quote, emit an escaped quote, then reopen.
 func shSingle(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
 }

@@ -10,8 +10,6 @@ import (
 // Charm-inspired "Tokyo Night" palette.
 var (
 	colBg      = lipgloss.Color("#1a1b26")
-	colBg2     = lipgloss.Color("#16161e")
-	colSurface = lipgloss.Color("#1f2335")
 	colBorder  = lipgloss.Color("#3b4261")
 	colSubtle  = lipgloss.Color("#565f89")
 	colMuted   = lipgloss.Color("#787c99")
@@ -39,7 +37,6 @@ var (
 	badgeOn   = lipgloss.NewStyle().Bold(true).Foreground(colBg).Background(colGreen).Padding(0, 1)
 	badgeOff  = lipgloss.NewStyle().Bold(true).Foreground(colBg).Background(colRed).Padding(0, 1)
 	badgeInfo = lipgloss.NewStyle().Bold(true).Foreground(colBg).Background(colPrimary).Padding(0, 1)
-	badgeWarn = lipgloss.NewStyle().Bold(true).Foreground(colBg).Background(colYellow).Padding(0, 1)
 	badgeDim  = lipgloss.NewStyle().Foreground(colMuted).Padding(0, 1)
 
 	// sidebar --------------------------------------------------------------
@@ -65,16 +62,9 @@ var (
 			BorderForeground(colBorder).
 			Padding(1, 2)
 
-	cardTitle = lipgloss.NewStyle().Foreground(colCyan).Bold(true)
-
 	sectionTitle = lipgloss.NewStyle().Foreground(colAccent).Bold(true)
 
 	// cards / panels -------------------------------------------------------
-	panelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colBorder).
-			Padding(0, 1)
-
 	statCard = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colBorder).
@@ -82,13 +72,11 @@ var (
 			Width(20)
 
 	statLabel = lipgloss.NewStyle().Foreground(colMuted)
-	statValue = lipgloss.NewStyle().Foreground(colText).Bold(true)
 	statBig   = lipgloss.NewStyle().Foreground(colCyan).Bold(true)
 
 	// generic text ---------------------------------------------------------
 	labelStyle = lipgloss.NewStyle().Foreground(colCyan).Bold(true)
 	dimStyle   = lipgloss.NewStyle().Foreground(colSubtle)
-	mutedStyle = lipgloss.NewStyle().Foreground(colMuted)
 	goodStyle  = lipgloss.NewStyle().Foreground(colGreen).Bold(true)
 	warnStyle  = lipgloss.NewStyle().Foreground(colYellow).Bold(true)
 	badStyle   = lipgloss.NewStyle().Foreground(colRed).Bold(true)
@@ -97,8 +85,6 @@ var (
 	botStyle   = lipgloss.NewStyle().Foreground(colGreen).Bold(true)
 
 	// chrome ---------------------------------------------------------------
-	helpStyle = lipgloss.NewStyle().Foreground(colSubtle)
-
 	noticeStyle = lipgloss.NewStyle().Bold(true).Foreground(colBg).
 			Background(colAccent).Padding(0, 1)
 

@@ -28,8 +28,6 @@ func (c catalogEntry) Description() string {
 	return fmt.Sprintf("%s · %s", tag, c.desc)
 }
 
-func (c catalogEntry) FilterValue() string { return c.name }
-
 // modelCatalog is the curated set offered in the browse menu.
 var modelCatalog = []catalogEntry{
 	// --- coding models (local) ---

@@ -2,6 +2,8 @@
 /tui/oilsand-tui
 /tui/oilsand-tui.exe
 /tui/oilsand-tui-*
+/tui/tui
+/tui/tui.exe
 *.test
 *.out
 
@@ -14,6 +16,10 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Runtime logs (MCP/TUI diagnostics)
+/logs/
+*.log
 
 # Local state / secrets (never commit)
 state.json
