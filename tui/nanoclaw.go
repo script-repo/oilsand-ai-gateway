@@ -42,14 +42,12 @@ const nanoclawDockerfileLabel = "oilsand.dockerfile-sha256"
 // those paths against the host, where they don't exist.
 const nanoclawDockerfile = `# Nanoclaw agent image, built by the Oilsand AI Gateway TUI.
 # Every deployed instance is a separate container from this one image.
-FROM ghcr.io/block/buzz:main AS buzzcli
+# NOTE: do not multi-stage COPY from ghcr.io/block/buzz — that image ships
+# buzz-relay/buzz-admin only (no buzz-cli). A missing COPY path fails the build.
 FROM node:22-bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates curl openssl \
  && rm -rf /var/lib/apt/lists/*
-# buzz-cli for Buzz relay presence (path may vary by image tag).
-COPY --from=buzzcli /usr/local/bin/buzz /usr/local/bin/buzz
-RUN chmod +x /usr/local/bin/buzz 2>/dev/null || true
 # Inner Docker engine: NanoClaw refuses to start without a container runtime
 # ("docker info" must succeed inside this container) and uses it to sandbox
 # its agents. Requires the instance to run with --privileged.

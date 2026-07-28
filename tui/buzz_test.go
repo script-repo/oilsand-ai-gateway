@@ -22,7 +22,10 @@ func TestBuzzDeployScript(t *testing.T) {
 		"ensuring git, openssl, curl", // bare gateway images lack these
 		"git clone",
 		"ERROR: git still missing",
-		"buzz_run", // host or docker fallback for channel create
+		"HOST_AUTH=",          // community tenancy host = IP:port
+		"RELAY_URL=ws://",     // seeds ensure_configured_community
+		"buzz-admin",          // generate-key for owner pubkey
+		"no community",        // operator hint when UI mismatches host
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)

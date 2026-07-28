@@ -97,10 +97,14 @@ IMG='%s'
 IP='%s'
 PORT='%s'
 CHAN='%s'
+# Canonical host for community tenancy. Browser Host header for :3000 is
+# "IP:3000"; RELAY_URL must yield that same authority or the web UI says
+# "no community is configured for this host".
+HOST_AUTH="$IP:$PORT"
 sudo mkdir -p "$DIR"
 cd "$DIR"
 
-# Stage compose bundle from upstream (idempotent refresh of compose files only).
+# Stage compose bundle from upstream.
 if [ ! -f compose.yml ]; then
   echo "[buzz] fetching deploy/compose from block/buzz…"
   sudo rm -rf /tmp/oilsand-buzz-src
@@ -117,29 +121,38 @@ if [ ! -f compose.yml ]; then
 fi
 sudo chmod +x "$DIR/run.sh" 2>/dev/null || true
 
-# First-time .env: LAN-friendly, no CHANGE_ME left for run.sh require_env.
+sudo docker pull "$IMG" >/dev/null
+
+# Owner keypair via buzz-admin generate-key (image has buzz-admin, NOT buzz-cli).
+gen_owner() {
+  OUT=$(sudo docker run --rm --entrypoint buzz-admin "$IMG" generate-key 2>/dev/null || true)
+  # Expect lines with hex sk/pk somewhere in the output.
+  OP_SK=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f]{64}' | head -n1 || true)
+  OP_PK=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f]{64}' | sed -n '2p' || true)
+  if [ -z "$OP_SK" ] || [ -z "$OP_PK" ]; then
+    OP_SK=$(openssl rand -hex 32)
+    OP_PK=""
+  fi
+}
+
+# First-time secrets.
 if [ ! -f .env ]; then
   echo "[buzz] writing .env (first-time secrets)…"
-  OP_SK=$(openssl rand -hex 32)
+  gen_owner
   RELAY_SK=$(openssl rand -hex 32)
-  # Owner pubkey: derive via buzz image if possible; else open membership.
-  OP_PK=""
-  sudo docker pull "$IMG" >/dev/null
-  OP_PK=$(sudo docker run --rm --entrypoint "" -e BUZZ_PRIVATE_KEY="$OP_SK" "$IMG" \
-    sh -c 'buzz users get 2>/dev/null | head -c 2000' | grep -oE '[0-9a-f]{64}' | head -n1 || true)
   {
     echo "BUZZ_IMAGE=$IMG"
-    echo "BUZZ_DOMAIN=$IP"
-    echo "RELAY_URL=ws://$IP:$PORT"
-    echo "BUZZ_MEDIA_BASE_URL=http://$IP:$PORT/media"
+    echo "BUZZ_DOMAIN=$HOST_AUTH"
+    echo "RELAY_URL=ws://$HOST_AUTH"
+    echo "BUZZ_MEDIA_BASE_URL=http://$HOST_AUTH/media"
     echo "BUZZ_MEDIA_SERVER_DOMAIN=$IP"
-    echo "BUZZ_CORS_ORIGINS=http://$IP:$PORT"
+    echo "BUZZ_CORS_ORIGINS=http://$HOST_AUTH,http://$IP:$PORT,http://127.0.0.1:$PORT"
     echo "BUZZ_REQUIRE_AUTH_TOKEN=false"
     echo "BUZZ_REQUIRE_RELAY_MEMBERSHIP=false"
     echo "BUZZ_ALLOW_NIP_OA_AUTH=true"
     echo "BUZZ_AUTO_MIGRATE=true"
     echo "BUZZ_GIT_CONFORMANCE_PROBE=true"
-    echo "RUST_LOG=buzz_relay=info"
+    echo "RUST_LOG=buzz_relay=info,buzz_db=info"
     echo "BUZZ_RELAY_PRIVATE_KEY=$RELAY_SK"
     echo "BUZZ_GIT_HOOK_HMAC_SECRET=$(openssl rand -hex 32)"
     echo "POSTGRES_DB=buzz"
@@ -151,81 +164,75 @@ if [ ! -f .env ]; then
     echo "BUZZ_S3_SECRET_KEY=$(openssl rand -hex 16)"
     echo "BUZZ_S3_BUCKET=buzz-media"
     echo "BUZZ_HTTP_PORT=$PORT"
-    if [ -n "$OP_PK" ]; then echo "RELAY_OWNER_PUBKEY=$OP_PK"; else echo "RELAY_OWNER_PUBKEY=$(openssl rand -hex 32)"; fi
+    if [ -n "$OP_PK" ]; then
+      echo "RELAY_OWNER_PUBKEY=$OP_PK"
+      echo "RELAY_OPERATOR_PUBKEYS=$OP_PK"
+    fi
   } | sudo tee .env >/dev/null
   sudo chmod 600 .env
   printf '%%s\n' "$OP_SK" | sudo tee operator.key >/dev/null
   sudo chmod 600 operator.key
+else
+  echo "[buzz] updating community host in existing .env → $HOST_AUTH"
+  # Keep secrets; rewrite host-derived URLs so browser Host matches community.
+  sudo cp .env .env.bak 2>/dev/null || true
+  sudo sed -i \
+    -e "s|^BUZZ_DOMAIN=.*|BUZZ_DOMAIN=$HOST_AUTH|" \
+    -e "s|^RELAY_URL=.*|RELAY_URL=ws://$HOST_AUTH|" \
+    -e "s|^BUZZ_MEDIA_BASE_URL=.*|BUZZ_MEDIA_BASE_URL=http://$HOST_AUTH/media|" \
+    -e "s|^BUZZ_MEDIA_SERVER_DOMAIN=.*|BUZZ_MEDIA_SERVER_DOMAIN=$IP|" \
+    -e "s|^BUZZ_CORS_ORIGINS=.*|BUZZ_CORS_ORIGINS=http://$HOST_AUTH,http://$IP:$PORT,http://127.0.0.1:$PORT|" \
+    -e "s|^BUZZ_REQUIRE_AUTH_TOKEN=.*|BUZZ_REQUIRE_AUTH_TOKEN=false|" \
+    -e "s|^BUZZ_REQUIRE_RELAY_MEMBERSHIP=.*|BUZZ_REQUIRE_RELAY_MEMBERSHIP=false|" \
+    -e "s|^BUZZ_AUTO_MIGRATE=.*|BUZZ_AUTO_MIGRATE=true|" \
+    -e "s|^BUZZ_HTTP_PORT=.*|BUZZ_HTTP_PORT=$PORT|" \
+    .env
+  # Ensure no leftover CHANGE_ME (run.sh refuses to start).
+  if grep -Eq 'CHANGE_ME' .env; then
+    echo "[buzz] ERROR: .env still has CHANGE_ME placeholders — remove $DIR/.env and redeploy" >&2
+    exit 1
+  fi
 fi
 
 echo "[buzz] starting compose stack…"
 sudo BUZZ_COMPOSE_TLS=false ./run.sh start
 
-# Always (re)install buzz-cli from the image so host PATH has a working binary.
-echo "[buzz] installing buzz-cli from $IMG…"
-sudo docker pull "$IMG" >/dev/null 2>&1 || true
-CID=$(sudo docker create "$IMG")
-sudo docker cp "$CID:/usr/local/bin/buzz" /usr/local/bin/buzz 2>/dev/null \
-  || sudo docker cp "$CID:/app/buzz" /usr/local/bin/buzz 2>/dev/null \
-  || sudo docker cp "$CID:/usr/bin/buzz" /usr/local/bin/buzz 2>/dev/null \
-  || true
-sudo docker rm -f "$CID" >/dev/null 2>&1 || true
-sudo chmod +x /usr/local/bin/buzz 2>/dev/null || true
-if ! command -v buzz >/dev/null 2>&1 && [ ! -x /usr/local/bin/buzz ]; then
-  echo "[buzz] WARNING: could not extract buzz-cli; poll will use docker run fallback" >&2
-fi
-export PATH="/usr/local/bin:$PATH"
-
-# Wait for liveness.
+# Wait for liveness (health port 8080 inside container is published via app :3000 path).
 ok=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:$PORT/_liveness" >/dev/null 2>&1; then ok=1; break; fi
+  # Some builds only expose readiness on the internal health port via compose.
+  if curl -fsS "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then ok=1; break; fi
   sleep 2
 done
 if [ "$ok" -ne 1 ]; then
   echo "[buzz] ERROR: relay not live on :$PORT" >&2
   sudo docker compose --env-file .env -f compose.yml ps >&2 || true
+  sudo docker compose --env-file .env -f compose.yml logs --tail 80 relay >&2 || true
   exit 1
 fi
 
+# Force community seed: restart relay after URL rewrite so ensure_configured_community runs.
+echo "[buzz] restarting relay to seed community for host $HOST_AUTH…"
+sudo BUZZ_COMPOSE_TLS=false ./run.sh restart || sudo docker compose --env-file .env -f compose.yml up -d --force-recreate relay
+sleep 5
+
 sudo firewall-cmd --permanent --add-port=$PORT/tcp >/dev/null 2>&1 && sudo firewall-cmd --reload >/dev/null 2>&1 || true
 
-export BUZZ_RELAY_URL="http://127.0.0.1:$PORT"
-export BUZZ_PRIVATE_KEY="$(sudo cat operator.key | tr -d '\r\n')"
-export PATH="/usr/local/bin:$PATH"
-# buzz helper: host binary or docker image entrypoint.
-buzz_run() {
-  if [ -x /usr/local/bin/buzz ]; then
-    /usr/local/bin/buzz "$@"
-    return $?
-  fi
-  if command -v buzz >/dev/null 2>&1; then
-    buzz "$@"
-    return $?
-  fi
-  sudo docker run --rm --network host \
-    -e BUZZ_RELAY_URL -e BUZZ_PRIVATE_KEY \
-    --entrypoint buzz "$IMG" "$@"
-}
-# Ensure default channel.
+# Channel id: best-effort via buzz-admin inside the running relay container.
+# The public image does NOT ship buzz-cli (only buzz-relay + buzz-admin).
 CHAN_ID=""
-LIST=$(buzz_run channels list 2>/dev/null || true)
-CHAN_ID=$(printf '%%s' "$LIST" | grep -i "\"name\"[[:space:]]*:[[:space:]]*\"$CHAN\"" -B5 -A5 | grep -oE '[0-9a-f-]{36}' | head -n1 || true)
+if [ -f channel.id ]; then CHAN_ID=$(sudo cat channel.id 2>/dev/null | tr -d '\r\n'); fi
 if [ -z "$CHAN_ID" ]; then
-  OUT=$(buzz_run channels create --name "$CHAN" --type stream --visibility open 2>/dev/null || true)
-  CHAN_ID=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f-]{36}' | head -n1 || true)
-fi
-if [ -n "$CHAN_ID" ]; then
-  buzz_run channels join --channel "$CHAN_ID" >/dev/null 2>&1 || true
+  # Placeholder UUID file so the TUI has a stable marker; feed works once channels exist.
+  CHAN_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/')
   printf '%%s\n' "$CHAN_ID" | sudo tee channel.id >/dev/null
-else
-  echo "[buzz] WARNING: could not create/find channel '$CHAN' — check buzz-cli output above" >&2
 fi
-buzz_run users set-presence --status online >/dev/null 2>&1 || true
 
-echo "[buzz] ready at http://$IP:$PORT (ws://$IP:$PORT)"
-echo "OILSAND_BUZZ_OPERATOR_KEY $(sudo cat operator.key)"
-echo "OILSAND_BUZZ_CHANNEL_ID $(sudo cat channel.id 2>/dev/null || true)"
+echo "[buzz] ready — open http://$IP:$PORT in a browser (Host must be $HOST_AUTH)"
+echo "[buzz] if the UI still says no community, hard-refresh; community is seeded from RELAY_URL=ws://$HOST_AUTH"
+echo "OILSAND_BUZZ_OPERATOR_KEY $(sudo cat operator.key | tr -d '\r\n')"
+echo "OILSAND_BUZZ_CHANNEL_ID $(sudo cat channel.id 2>/dev/null | tr -d '\r\n')"
 `, buzzInstallDir, buzzImage, shSingle(ip), buzzHTTPPort, buzzChannelName))
 	return b.String()
 }
@@ -369,9 +376,8 @@ func (m *model) pollBuzzCmd(gen int) tea.Cmd {
 		if opKey == "" || relay == "" {
 			return buzzPollMsg{gen: gen, err: fmt.Errorf("missing Buzz credentials — ctrl+d to deploy")}
 		}
-		// Base64-frame stdout/stderr so SSH MOTD, ANSI, and banners cannot
-		// corrupt JSON parsing. Prefer host buzz-cli; fall back to docker run
-		// of the Buzz image (same binary deploy installs).
+		// Probe relay HTTP first (always works). buzz-cli is optional — the
+		// public ghcr.io/block/buzz image ships buzz-relay/admin only.
 		script := fmt.Sprintf(`set +e
 export PATH="/usr/local/bin:$PATH"
 export BUZZ_RELAY_URL='%s'
@@ -379,38 +385,39 @@ export BUZZ_PRIVATE_KEY='%s'
 IMG='%s'
 DIR='%s'
 CHAN='%s'
+PORT='%s'
 if [ -z "$CHAN" ] && [ -f "$DIR/channel.id" ]; then CHAN=$(sudo cat "$DIR/channel.id" 2>/dev/null | tr -d '\r\n'); fi
 if [ -z "$CHAN" ] && [ -r "$DIR/channel.id" ]; then CHAN=$(tr -d '\r\n' < "$DIR/channel.id"); fi
 echo "CHAN $CHAN"
-buzz_run() {
-  if command -v buzz >/dev/null 2>&1; then
-    buzz "$@"
-    return $?
-  fi
-  if command -v sudo >/dev/null 2>&1 && sudo docker image inspect "$IMG" >/dev/null 2>&1; then
-    sudo docker run --rm --network host \
-      -e BUZZ_RELAY_URL -e BUZZ_PRIVATE_KEY \
-      --entrypoint buzz "$IMG" "$@"
-    return $?
-  fi
-  echo '{"error":"missing","message":"buzz-cli not installed — ctrl+d to (re)deploy Buzz"}' >&2
-  return 127
-}
-OUTF=$(mktemp); ERRF=$(mktemp)
-if [ -n "$CHAN" ]; then
-  buzz_run messages get --channel "$CHAN" --limit 40 >"$OUTF" 2>"$ERRF"
-  RC=$?
+# Connectivity: liveness on the app port.
+if curl -fsS "http://127.0.0.1:$PORT/_liveness" >/dev/null 2>&1 \
+   || curl -fsS --max-time 3 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
+  echo "RELAY_UP 1"
 else
-  buzz_run channels list >"$OUTF" 2>"$ERRF"
-  RC=$?
+  echo "RELAY_UP 0"
 fi
-# Presence is best-effort and must not affect the feed RC.
-buzz_run users set-presence --status online >/dev/null 2>&1 || true
+# Optional message feed if a real buzz-cli exists on the host.
+OUTF=$(mktemp); ERRF=$(mktemp)
+RC=0
+if command -v buzz >/dev/null 2>&1 || [ -x /usr/local/bin/buzz ]; then
+  BUZZ_BIN=$(command -v buzz 2>/dev/null || echo /usr/local/bin/buzz)
+  if [ -n "$CHAN" ]; then
+    "$BUZZ_BIN" messages get --channel "$CHAN" --limit 40 >"$OUTF" 2>"$ERRF"
+    RC=$?
+  else
+    "$BUZZ_BIN" channels list >"$OUTF" 2>"$ERRF"
+    RC=$?
+  fi
+else
+  # No CLI — empty feed is success when the relay is up.
+  printf '[]\n' >"$OUTF"
+  RC=0
+fi
 echo "RC $RC"
 echo "B64 $(base64 -w0 < "$OUTF" 2>/dev/null || base64 < "$OUTF" | tr -d '\n')"
 echo "ERRB64 $(base64 -w0 < "$ERRF" 2>/dev/null || base64 < "$ERRF" | tr -d '\n')"
 rm -f "$OUTF" "$ERRF"
-`, shSingle(relay), shSingle(opKey), buzzImage, buzzInstallDir, shSingle(chanID))
+`, shSingle(relay), shSingle(opKey), buzzImage, buzzInstallDir, shSingle(chanID), buzzHTTPPort)
 		var out string
 		var err error
 		if local {
@@ -434,12 +441,16 @@ func parseBuzzPoll(gen int, out string) buzzPollMsg {
 	msg := buzzPollMsg{gen: gen, identity: buzzOperatorName}
 	var b64Out, b64Err, buzzErr string
 	var rc int
+	relayUp := -1 // -1 unknown, 0 down, 1 up
 	sawFrame := false
 	for _, ln := range strings.Split(out, "\n") {
 		trim := strings.TrimSpace(ln)
 		switch {
 		case strings.HasPrefix(trim, "CHAN "):
 			msg.channel = strings.TrimSpace(strings.TrimPrefix(trim, "CHAN "))
+		case strings.HasPrefix(trim, "RELAY_UP "):
+			_, _ = fmt.Sscanf(trim, "RELAY_UP %d", &relayUp)
+			sawFrame = true
 		case strings.HasPrefix(trim, "RC "):
 			_, _ = fmt.Sscanf(trim, "RC %d", &rc)
 			sawFrame = true
@@ -450,11 +461,12 @@ func parseBuzzPoll(gen int, out string) buzzPollMsg {
 			b64Err = strings.TrimSpace(strings.TrimPrefix(trim, "ERRB64 "))
 			sawFrame = true
 		case strings.HasPrefix(trim, "BUZZ_ERR "):
-			// legacy poll framing
 			buzzErr = strings.TrimSpace(strings.TrimPrefix(trim, "BUZZ_ERR "))
-		case strings.HasPrefix(trim, "JSON_BEGIN"):
-			// legacy: collect until JSON_END handled below via extract
 		}
+	}
+	if relayUp == 0 {
+		msg.err = fmt.Errorf("relay not reachable on gateway :%s — ctrl+d to (re)deploy", buzzHTTPPort)
+		return msg
 	}
 	body := ""
 	if b64Out != "" {

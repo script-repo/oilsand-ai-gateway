@@ -17,6 +17,7 @@ func TestOmnirouteDeployScript(t *testing.T) {
 		"--name omniroute-redis",    // redis sidecar for rate limiter
 		"--env-file " + omnirouteEnvPath,
 		"OMNIROUTE_WS_BRIDGE_SECRET=",
+		"INITIAL_PASSWORD=" + omnirouteLabPassword,
 		"-p " + omniroutePort + ":" + omniroutePort,
 		"-p " + omnirouteAPIPort + ":" + omnirouteAPIPort,
 		"-p " + omnirouteWSPort + ":" + omnirouteWSPort,

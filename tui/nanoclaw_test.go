@@ -6,20 +6,22 @@ import (
 	"testing"
 )
 
-// The image must carry buzz-cli and a join script: upstream NanoClaw does not
-// speak Buzz, so without a process of ours inside the container no instance
-// ever appears on the channel, however the env is set.
+// The image ships a Buzz join script; buzz-cli itself is optional (the public
+// block/buzz image has buzz-relay/admin only — copying buzz-cli from it used
+// to fail the whole Nanoclaw image build).
 func TestNanoclawImageShipsBuzzJoin(t *testing.T) {
 	for _, want := range []string{
 		"/usr/local/bin/oilsand-join-buzz.sh",
 		"OILSAND_BUZZ_RELAY_URL",
-		"FROM ghcr.io/block/buzz:main AS buzzcli",
 		"buzz users set-presence",
 		"buzz channels join",
 	} {
 		if !strings.Contains(nanoclawDockerfile, want) {
 			t.Errorf("Dockerfile missing %q", want)
 		}
+	}
+	if strings.Contains(nanoclawDockerfile, "FROM ghcr.io/block/buzz:main AS buzzcli") {
+		t.Error("multi-stage buzzcli copy breaks the build (image has no /usr/local/bin/buzz)")
 	}
 	// Join must not block NanoClaw itself from starting.
 	if !strings.Contains(nanoclawDockerfile, "oilsand-join-buzz.sh >> /var/log/oilsand-buzz.log 2>&1 &") {

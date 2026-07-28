@@ -24,6 +24,12 @@ const (
 // omnirouteEnvFragment writes a persistent env file with production secrets
 // when missing. Upstream requires OMNIROUTE_WS_BRIDGE_SECRET (and related keys)
 // in Docker; without them the process often dies immediately after start.
+//
+// INITIAL_PASSWORD is only applied on first boot of an empty data volume.
+// A volume that already bootstrapped with upstream default CHANGEME will ignore
+// later env changes — we detect that and offer a one-shot volume reset.
+const omnirouteLabPassword = "oilsand"
+
 const omnirouteEnvFragment = `ENVF='` + omnirouteEnvPath + `'
 sudo mkdir -p /opt/oilsand
 if [ ! -f "$ENVF" ]; then
@@ -36,7 +42,7 @@ if [ ! -f "$ENVF" ]; then
     echo "STORAGE_ENCRYPTION_KEY=$(openssl rand -hex 32)"
     echo "STORAGE_ENCRYPTION_KEY_VERSION=v1"
     echo "MACHINE_ID_SALT=$(openssl rand -hex 16)"
-    echo "INITIAL_PASSWORD=oilsand-$(openssl rand -hex 4)"
+    echo "INITIAL_PASSWORD=` + omnirouteLabPassword + `"
     echo "PORT=` + omniroutePort + `"
     echo "DASHBOARD_PORT=` + omniroutePort + `"
     echo "API_PORT=` + omnirouteAPIPort + `"
@@ -47,8 +53,15 @@ if [ ! -f "$ENVF" ]; then
     echo "REDIS_URL=redis://omniroute-redis:6379"
   } | sudo tee "$ENVF" >/dev/null
   sudo chmod 600 "$ENVF"
-  echo "[deploy] initial dashboard password is in $ENVF (INITIAL_PASSWORD)"
+else
+  # Ensure INITIAL_PASSWORD is present for display (does not rewrite DB password).
+  if ! sudo grep -q '^INITIAL_PASSWORD=' "$ENVF" 2>/dev/null; then
+    echo "INITIAL_PASSWORD=` + omnirouteLabPassword + `" | sudo tee -a "$ENVF" >/dev/null
+  fi
 fi
+PW=$(sudo grep -E '^INITIAL_PASSWORD=' "$ENVF" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '\r')
+echo "[deploy] dashboard login password (INITIAL_PASSWORD): ${PW:-` + omnirouteLabPassword + `}"
+echo "[deploy] (only applied on first boot of an empty omniroute-data volume)"
 `
 
 // omnirouteRunFragment (re)creates redis + the omniroute service on a shared
@@ -94,8 +107,12 @@ echo "[deploy] starting omniroute-redis + omniroute…"
 `)
 	b.WriteString(omnirouteRunFragment)
 	b.WriteString(`IP=$(hostname -I 2>/dev/null | cut -d" " -f1)
+PW=$(sudo grep -E '^INITIAL_PASSWORD=' ` + omnirouteEnvPath + ` 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '\r')
 echo "[deploy] OmniRoute is up — dashboard at http://${IP:-<this-host>}:` + omniroutePort + `"
-echo "[deploy] OpenAI-compatible API also on :` + omnirouteAPIPort + ` (see docs). You can close this window."
+echo "[deploy] login password: ${PW:-` + omnirouteLabPassword + `}  (user is typically admin / empty — see login page)"
+echo "[deploy] If password CHANGEME or login fails, the volume was bootstrapped before secrets were set."
+echo "[deploy] Fix once:  sudo docker rm -f omniroute; sudo docker volume rm omniroute-data; then redeploy OmniRoute"
+echo "[deploy] OpenAI-compatible API also on :` + omnirouteAPIPort + `. You can close this window."
 `)
 	return b.String()
 }
@@ -114,8 +131,12 @@ func omnirouteUpdateScript() string {
 // dashboard/API URL, show container status, then follow the service logs.
 func omnirouteConsoleScript() string {
 	return `IP=$(hostname -I 2>/dev/null | cut -d" " -f1)
+PW=$(sudo grep -E '^INITIAL_PASSWORD=' ` + omnirouteEnvPath + ` 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '\r')
 echo "OmniRoute dashboard: http://${IP:-localhost}:` + omniroutePort + `"
 echo "OpenAI-compatible API: http://${IP:-localhost}:` + omnirouteAPIPort + `"
+echo "INITIAL_PASSWORD (first-boot only): ${PW:-` + omnirouteLabPassword + `}"
+echo "If login still expects CHANGEME, wipe volume and redeploy:"
+echo "  sudo docker rm -f omniroute && sudo docker volume rm omniroute-data"
 sudo docker ps -a --filter name=omniroute --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo "[following omniroute logs - Ctrl-C to exit]"
 sudo docker logs -f --tail 50 omniroute`
