@@ -25,6 +25,37 @@ const (
 	buzzPollEvery    = 3 * time.Second
 )
 
+// buzzHostDepsBootstrap installs tools the Buzz deploy script needs on a bare
+// gateway image (git for compose staging, openssl for secrets, curl for the
+// liveness wait). Rocky/RHEL and Ubuntu/Debian.
+const buzzHostDepsBootstrap = `echo "[buzz] ensuring git, openssl, curl…"
+. /etc/os-release 2>/dev/null || true
+need_git=0; need_ssl=0; need_curl=0
+command -v git >/dev/null 2>&1 || need_git=1
+command -v openssl >/dev/null 2>&1 || need_ssl=1
+command -v curl >/dev/null 2>&1 || need_curl=1
+if [ "$need_git$need_ssl$need_curl" != "000" ]; then
+  case "${ID:-}" in
+    ubuntu|debian)
+      sudo apt-get update -y >/dev/null 2>&1 || true
+      pkgs=""
+      [ "$need_git" = 1 ] && pkgs="$pkgs git"
+      [ "$need_ssl" = 1 ] && pkgs="$pkgs openssl"
+      [ "$need_curl" = 1 ] && pkgs="$pkgs curl"
+      sudo apt-get install -y $pkgs
+      ;;
+    *)
+      pkgs=""
+      [ "$need_git" = 1 ] && pkgs="$pkgs git"
+      [ "$need_ssl" = 1 ] && pkgs="$pkgs openssl"
+      [ "$need_curl" = 1 ] && pkgs="$pkgs curl"
+      sudo dnf install -y $pkgs 2>/dev/null || sudo yum install -y $pkgs
+      ;;
+  esac
+fi
+command -v git >/dev/null 2>&1 || { echo "[buzz] ERROR: git still missing after install" >&2; exit 1; }
+`
+
 // buzzLine is one rendered line of the Buzz feed.
 type buzzLine struct {
 	from, to, text, ts string
@@ -57,6 +88,9 @@ func buzzDeployScript(gatewayIP string) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	b.WriteString(dockerBootstrap)
+	// Gateway images often ship without git/openssl/curl; compose staging and
+	// first-time .env generation need them before any clone or rand work.
+	b.WriteString(buzzHostDepsBootstrap)
 	b.WriteString(fmt.Sprintf(`DIR='%s'
 IMG='%s'
 IP='%s'
@@ -68,10 +102,15 @@ cd "$DIR"
 # Stage compose bundle from upstream (idempotent refresh of compose files only).
 if [ ! -f compose.yml ]; then
   echo "[buzz] fetching deploy/compose from block/buzz…"
-  sudo git clone --depth 1 --filter=blob:none --sparse https://github.com/block/buzz.git /tmp/oilsand-buzz-src 2>/dev/null \
-    || { sudo rm -rf /tmp/oilsand-buzz-src; sudo git clone --depth 1 https://github.com/block/buzz.git /tmp/oilsand-buzz-src; }
+  sudo rm -rf /tmp/oilsand-buzz-src
+  git clone --depth 1 --filter=blob:none --sparse https://github.com/block/buzz.git /tmp/oilsand-buzz-src 2>/dev/null \
+    || { rm -rf /tmp/oilsand-buzz-src; git clone --depth 1 https://github.com/block/buzz.git /tmp/oilsand-buzz-src; }
   if [ -d /tmp/oilsand-buzz-src/.git ]; then
-    (cd /tmp/oilsand-buzz-src && sudo git sparse-checkout set deploy/compose) 2>/dev/null || true
+    (cd /tmp/oilsand-buzz-src && git sparse-checkout set deploy/compose) 2>/dev/null || true
+  fi
+  if [ ! -d /tmp/oilsand-buzz-src/deploy/compose ]; then
+    echo "[buzz] ERROR: deploy/compose missing from block/buzz clone" >&2
+    exit 1
   fi
   sudo cp -a /tmp/oilsand-buzz-src/deploy/compose/. "$DIR"/
 fi

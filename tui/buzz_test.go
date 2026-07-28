@@ -18,6 +18,9 @@ func TestBuzzDeployScript(t *testing.T) {
 		"OILSAND_BUZZ_OPERATOR_KEY",
 		"oilsand", // default channel name
 		"ensuring Docker",
+		"ensuring git, openssl, curl", // bare gateway images lack these
+		"git clone",
+		"ERROR: git still missing",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)
