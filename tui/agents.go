@@ -26,25 +26,43 @@ type agentDef struct {
 
 // depsBootstrap installs the prerequisites the npm/Node agents need on
 // Rocky/RHEL and Ubuntu/Debian and makes `npm -g` usable as a non-root user:
-//   - git (Hermes/OpenClaw installers require it)
+//   - curl + git (Hermes/OpenClaw installers require them)
 //   - Node.js 22 via NodeSource (these are Node tools)
 //   - a user-writable npm global prefix (~/.npm-global), because NodeSource sets
 //     the prefix to /usr, which makes `npm install -g openclaw` fail with EACCES
-//     for a normal user. We also persist the bin dir (and ~/.local/bin) on PATH.
-const depsBootstrap = `echo "[deploy] ensuring git + Node.js…"
+//     for a normal user. We also put /usr/local/bin + ~/.local/bin + npm bin on
+//     PATH (non-login SSH often misses them → exit 127).
+const depsBootstrap = `echo "[deploy] ensuring curl, git, Node.js…"
 . /etc/os-release 2>/dev/null || true
-if ! command -v git >/dev/null 2>&1; then
+# Broad PATH first so later command -v finds ollama/hermes/openclaw where packages put them.
+export PATH="/usr/local/bin:/usr/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+need_curl=0; need_git=0
+command -v curl >/dev/null 2>&1 || need_curl=1
+command -v git >/dev/null 2>&1 || need_git=1
+if [ "$need_curl$need_git" != "00" ]; then
   case "${ID:-}" in
-    ubuntu|debian) sudo apt-get update -y >/dev/null 2>&1 || true; sudo apt-get install -y git ;;
-    *) sudo dnf install -y git 2>/dev/null || sudo yum install -y git ;;
+    ubuntu|debian)
+      sudo apt-get update -y >/dev/null 2>&1 || true
+      pkgs=""
+      [ "$need_curl" = 1 ] && pkgs="$pkgs curl"
+      [ "$need_git" = 1 ] && pkgs="$pkgs git"
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $pkgs
+      ;;
+    *)
+      pkgs=""
+      [ "$need_curl" = 1 ] && pkgs="$pkgs curl"
+      [ "$need_git" = 1 ] && pkgs="$pkgs git"
+      sudo dnf install -y $pkgs 2>/dev/null || sudo yum install -y $pkgs
+      ;;
   esac
 fi
+command -v curl >/dev/null 2>&1 || { echo "[deploy] ERROR: curl still missing" >&2; exit 1; }
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "[deploy] installing Node.js 22 + npm via NodeSource (sudo)…"
   case "${ID:-}" in
     ubuntu|debian)
       curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-      sudo apt-get install -y nodejs
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
       ;;
     *)
       curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
@@ -52,12 +70,15 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
       ;;
   esac
 fi
+command -v npm >/dev/null 2>&1 || { echo "[deploy] ERROR: npm still missing after Node install" >&2; exit 1; }
 NPM_PREFIX="$HOME/.npm-global"
 mkdir -p "$NPM_PREFIX/bin" "$HOME/.local/bin"
 npm config set prefix "$NPM_PREFIX" >/dev/null 2>&1 || true
-export PATH="$HOME/.local/bin:$NPM_PREFIX/bin:$PATH"
+export PATH="/usr/local/bin:$HOME/.local/bin:$NPM_PREFIX/bin:$PATH"
+hash -r 2>/dev/null || true
 grep -q '.npm-global/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.bashrc"
 grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+grep -q '/usr/local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> "$HOME/.bashrc"
 `
 
 // crushDeployScript installs crush from the Charm yum repo on the Olla server
@@ -128,34 +149,89 @@ var agentCatalog = []agentDef{
 }
 
 // hermesInstallFragment installs Hermes via the official Nous installer when
-// missing, with ollama launch as a best-effort secondary. Fails closed if
-// hermes is still not on PATH afterward (avoids exit 127 from a later bare
-// `hermes` invocation). Expects depsBootstrap to have put ~/.local/bin on PATH.
-const hermesInstallFragment = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+// missing (--skip-setup so the wizard cannot hang a headless deploy). ollama
+// launch is a last-resort fallback. Fails closed if hermes is still missing
+// (avoids exit 127 from a later bare `hermes` call).
+const hermesInstallFragment = `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+hash -r 2>/dev/null || true
 if ! command -v hermes >/dev/null 2>&1; then
-  echo "[deploy] installing hermes (official installer)…"
-  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  echo "[deploy] installing hermes (official installer, skip setup)…"
+  # --skip-setup: no interactive wizard. HERMES_NONINTERACTIVE is also set by caller.
+  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+# Installer may put the wrapper in ~/.local/bin or /usr/local/bin without
+# refreshing this shell's hash table.
+if ! command -v hermes >/dev/null 2>&1; then
+  for c in "$HOME/.local/bin/hermes" /usr/local/bin/hermes "$HOME/.hermes/bin/hermes"; do
+    if [ -x "$c" ]; then export PATH="$(dirname "$c"):$PATH"; break; fi
+  done
+  hash -r 2>/dev/null || true
 fi
 if ! command -v hermes >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
   echo "[deploy] hermes still missing; trying ollama launch hermes…"
   ollama launch hermes --yes --model __HERMES_MODEL__ </dev/null || true
-  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
 fi
 if ! command -v hermes >/dev/null 2>&1; then
-  echo "[deploy] ERROR: hermes not found on PATH after install (tried official installer + ollama launch)" >&2
-  echo "[deploy] ensure ~/.local/bin is on PATH and re-run, or install manually:" >&2
-  echo "[deploy]   curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" >&2
+  echo "[deploy] ERROR: hermes not found on PATH after install" >&2
+  echo "[deploy] tried: official installer --skip-setup, then ollama launch" >&2
+  echo "[deploy] PATH=$PATH" >&2
+  ls -la "$HOME/.local/bin" /usr/local/bin 2>/dev/null | head -40 >&2 || true
   exit 1
 fi
 echo "[deploy] hermes: $(command -v hermes)"
 `
 
+// openclawInstallFragment installs OpenClaw via npm (user prefix) or the
+// official install.sh. Does NOT rely on `ollama launch` first — that fails with
+// exit 127 when ollama is missing/off-PATH on the worker.
+const openclawInstallFragment = `export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+hash -r 2>/dev/null || true
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "[deploy] installing openclaw…"
+  if command -v npm >/dev/null 2>&1; then
+    echo "[deploy] npm install -g openclaw@latest (prefix $HOME/.npm-global)…"
+    npm install -g openclaw@latest
+  fi
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "[deploy] npm path missed; trying official install.sh…"
+  curl -fsSL https://openclaw.ai/install.sh | bash
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1; then
+  for c in "$HOME/.npm-global/bin/openclaw" "$HOME/.local/bin/openclaw" /usr/local/bin/openclaw; do
+    if [ -x "$c" ]; then export PATH="$(dirname "$c"):$PATH"; break; fi
+  done
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
+  echo "[deploy] openclaw still missing; trying ollama launch openclaw…"
+  ollama launch openclaw --yes --model __OPENCLAW_MODEL__ </dev/null || true
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
+fi
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "[deploy] ERROR: openclaw not found on PATH after install" >&2
+  echo "[deploy] tried: npm -g, openclaw.ai/install.sh, ollama launch" >&2
+  echo "[deploy] PATH=$PATH" >&2
+  ls -la "$HOME/.npm-global/bin" "$HOME/.local/bin" 2>/dev/null | head -40 >&2 || true
+  exit 1
+fi
+echo "[deploy] openclaw: $(command -v openclaw)"
+`
+
 // agentDeployScript returns the install bootstrap for an agent. Crush uses the
-// Charm repo; Hermes uses the official installer then Olla config (+ optional
-// Telegram gateway); OpenClaw bootstraps deps then ollama launch. Headless
-// Hermes deploy does NOT exec interactive `hermes` — that caused exit 127 when
-// the binary was missing and blocked agent registration on a clean exit.
+// Charm repo; Hermes/OpenClaw use official installers (not bare ollama launch).
+// Headless deploys exit 0 after install so the TUI can register the agent —
+// they do NOT exec the interactive CLI (that caused exit 127 when the binary
+// was missing/off-PATH and blocked registration).
 func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Crush" {
 		return crushDeployScript
@@ -173,9 +249,9 @@ func (m *model) agentDeployScript(a agentDef) string {
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
+	b.WriteString(depsBootstrap)
 	if a.name == "Hermes" {
 		b.WriteString("export HERMES_NONINTERACTIVE=1\n")
-		b.WriteString(depsBootstrap)
 		b.WriteString(strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model))
 		b.WriteString(m.hermesOllaConfigScript(model))
 		if gateway {
@@ -186,16 +262,20 @@ func (m *model) agentDeployScript(a agentDef) string {
 		}
 		return b.String()
 	}
-	b.WriteString(depsBootstrap)
+	if a.name == "OpenClaw" {
+		b.WriteString(strings.ReplaceAll(openclawInstallFragment, "__OPENCLAW_MODEL__", model))
+		b.WriteString("echo \"[deploy] OpenClaw installed. Open it from Agents (enter) to chat / onboard.\"\n")
+		return b.String()
+	}
+	// Generic fallback (should not hit for catalog agents).
 	b.WriteString(fmt.Sprintf("if ! command -v %s >/dev/null 2>&1; then\n", a.cli))
-	b.WriteString(fmt.Sprintf("  echo \"[deploy] installing %s (headless, model %s)…\"\n", a.cli, model))
-	b.WriteString(fmt.Sprintf("  ollama launch %s --yes --model %s </dev/null\n", a.cli, model))
+	b.WriteString(fmt.Sprintf("  echo \"[deploy] installing %s…\"\n", a.cli))
+	b.WriteString(fmt.Sprintf("  if command -v ollama >/dev/null 2>&1; then ollama launch %s --yes --model %s </dev/null || true; fi\n", a.cli, model))
 	b.WriteString("fi\n")
 	b.WriteString(fmt.Sprintf("if ! command -v %s >/dev/null 2>&1; then\n", a.cli))
 	b.WriteString(fmt.Sprintf("  echo \"[deploy] ERROR: %s not found on PATH after install\" >&2\n", a.cli))
 	b.WriteString("  exit 1\nfi\n")
-	b.WriteString(fmt.Sprintf("echo \"[deploy] launching %s…\"\n", a.cli))
-	b.WriteString(a.cli + "\n")
+	b.WriteString(fmt.Sprintf("echo \"[deploy] %s ready: $(command -v %s)\"\n", a.cli, a.cli))
 	return b.String()
 }
 
@@ -447,7 +527,9 @@ func (m *model) agentHost(a agentDef) string {
 // etc.). Without this, `ssh host crush` runs in a minimal non-login PATH and
 // fails with 127 even when the tool is installed.
 func loginShell(cmd string) string {
-	return "bash -lc '" + cmd + "'"
+	// Prepend common install dirs inside the login shell too — some images'
+	// .bash_profile never sources .bashrc, so npm-global/local bins stay hidden.
+	return "bash -lc 'export PATH=\"/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; " + cmd + "'"
 }
 
 // crushConfigJSON builds a crush.json that registers the Olla gateway as an

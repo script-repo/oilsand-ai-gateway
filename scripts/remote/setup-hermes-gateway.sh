@@ -77,9 +77,10 @@ grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || \
 
 # --- 2. install hermes if missing ------------------------------------------
 if ! command -v hermes >/dev/null 2>&1; then
-  log "installing hermes (official installer)…"
-  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  log "installing hermes (official installer, skip setup)…"
+  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --skip-setup
+  export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+  hash -r 2>/dev/null || true
 fi
 if ! command -v hermes >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
   log "hermes still missing; trying ollama launch hermes…"
