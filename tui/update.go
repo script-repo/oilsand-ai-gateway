@@ -1273,7 +1273,7 @@ func (m *model) openSelectedAgent() tea.Cmd {
 	a, _ := agentByName(it.name)
 	if a.container {
 		// Nanoclaw is many isolated containers: refresh the live inventory, then
-		// let the user pick which instance to open an interactive ncl session in
+		// let the user pick which instance to open CLI chat in
 		// (rather than launching a single CLI on a host).
 		if len(m.agentDeployedHosts(a.name)) == 0 {
 			m.notice = a.name + " is not deployed anywhere yet — press d to deploy it on a worker"

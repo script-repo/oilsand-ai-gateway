@@ -350,18 +350,30 @@ func (m *model) pollBuzzCmd(gen int) tea.Cmd {
 		if opKey == "" || relay == "" {
 			return buzzPollMsg{gen: gen, err: fmt.Errorf("missing Buzz credentials — ctrl+d to deploy")}
 		}
-		script := fmt.Sprintf(`export BUZZ_RELAY_URL='%s' BUZZ_PRIVATE_KEY='%s'
-if ! command -v buzz >/dev/null 2>&1 && [ -x /usr/local/bin/buzz ]; then export PATH="/usr/local/bin:$PATH"; fi
+		// Isolate JSON on stdout between markers. buzz-cli prints JSON on stdout and
+	// errors as JSON on stderr; CombinedOutput/MOTD/presence noise must not
+	// poison the feed parser.
+	script := fmt.Sprintf(`export BUZZ_RELAY_URL='%s' BUZZ_PRIVATE_KEY='%s' PATH="/usr/local/bin:$PATH"
 CHAN='%s'
-if [ -z "$CHAN" ] && [ -f %s/channel.id ]; then CHAN=$(cat %s/channel.id); fi
+if [ -z "$CHAN" ] && [ -f %s/channel.id ]; then CHAN=$(sudo cat %s/channel.id 2>/dev/null | tr -d '\r\n'); fi
+if [ -z "$CHAN" ] && [ -r %s/channel.id ]; then CHAN=$(tr -d '\r\n' < %s/channel.id); fi
 echo "CHAN $CHAN"
 buzz users set-presence --status online >/dev/null 2>&1 || true
+ERRF=$(mktemp)
+OUTF=$(mktemp)
 if [ -n "$CHAN" ]; then
-  buzz messages get --channel "$CHAN" --limit 40 2>/dev/null || echo '[]'
+  buzz --format json messages get --channel "$CHAN" --limit 40 >"$OUTF" 2>"$ERRF" || true
 else
-  buzz channels list 2>/dev/null || echo '[]'
+  buzz --format json channels list >"$OUTF" 2>"$ERRF" || true
 fi
-`, shSingle(relay), shSingle(opKey), shSingle(chanID), buzzInstallDir, buzzInstallDir)
+echo "JSON_BEGIN"
+if [ -s "$OUTF" ]; then cat "$OUTF"; else echo '[]'; fi
+echo
+echo "JSON_END"
+if [ -s "$ERRF" ]; then echo "BUZZ_ERR $(tr '\n' ' ' < "$ERRF")"; fi
+rm -f "$OUTF" "$ERRF"
+`, shSingle(relay), shSingle(opKey), shSingle(chanID),
+		buzzInstallDir, buzzInstallDir, buzzInstallDir, buzzInstallDir)
 		var out string
 		var err error
 		if local {
@@ -385,25 +397,68 @@ fi
 func parseBuzzPoll(gen int, out string) buzzPollMsg {
 	msg := buzzPollMsg{gen: gen, identity: buzzOperatorName}
 	lines := strings.Split(out, "\n")
-	var jsonStart int
-	for i, ln := range lines {
-		if strings.HasPrefix(strings.TrimSpace(ln), "CHAN ") {
-			msg.channel = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ln), "CHAN "))
-			jsonStart = i + 1
-			break
+	var buzzErr string
+	var jsonParts []string
+	inJSON := false
+	sawMarker := false
+	for _, ln := range lines {
+		trim := strings.TrimSpace(ln)
+		switch {
+		case strings.HasPrefix(trim, "CHAN "):
+			msg.channel = strings.TrimSpace(strings.TrimPrefix(trim, "CHAN "))
+		case strings.HasPrefix(trim, "BUZZ_ERR "):
+			buzzErr = strings.TrimSpace(strings.TrimPrefix(trim, "BUZZ_ERR "))
+		case trim == "JSON_BEGIN":
+			inJSON, sawMarker = true, true
+			jsonParts = jsonParts[:0]
+		case trim == "JSON_END":
+			inJSON = false
+		case inJSON:
+			jsonParts = append(jsonParts, ln)
 		}
 	}
-	body := strings.TrimSpace(strings.Join(lines[jsonStart:], "\n"))
+	body := strings.TrimSpace(strings.Join(jsonParts, "\n"))
+	if !sawMarker {
+		// Older poll script / partial output: scrape any JSON blob from the text.
+		body = extractJSONPayload(out)
+	}
 	if body == "" {
 		body = "[]"
 	}
-	// Accept either a bare array or an object with a data/messages field.
-	var raw any
-	if json.Unmarshal([]byte(body), &raw) != nil {
-		msg.err = fmt.Errorf("could not parse buzz-cli JSON")
+
+	raw, err := decodeBuzzJSON(body)
+	if err != nil {
+		// Prefer the CLI's own error JSON when stdout was empty/unusable.
+		if buzzErr != "" {
+			if eraw, e2 := decodeBuzzJSON(extractJSONPayload(buzzErr)); e2 == nil {
+				if obj, ok := eraw.(map[string]any); ok {
+					if m := buzzStr(obj, "message", "error", "detail"); m != "" {
+						msg.err = fmt.Errorf("buzz-cli: %s", m)
+						return msg
+					}
+				}
+			}
+			msg.err = fmt.Errorf("buzz-cli: %s", truncate(buzzErr, 160))
+			return msg
+		}
+		msg.err = fmt.Errorf("could not parse buzz-cli JSON: %s", truncate(strings.ReplaceAll(body, "\n", " "), 120))
 		return msg
 	}
+	// Top-level error object from buzz-cli (sometimes printed on stdout).
+	if obj, ok := raw.(map[string]any); ok {
+		if m := buzzStr(obj, "message"); m != "" && buzzStr(obj, "error") != "" {
+			msg.err = fmt.Errorf("buzz-cli: %s", m)
+			return msg
+		}
+	}
+
 	arr := buzzJSONArray(raw)
+	if arr == nil {
+		// Single event object — treat as one-line feed.
+		if obj, ok := raw.(map[string]any); ok {
+			arr = []any{obj}
+		}
+	}
 	peers := map[string]struct{}{}
 	for _, item := range arr {
 		obj, ok := item.(map[string]any)
@@ -414,21 +469,99 @@ func parseBuzzPoll(gen int, out string) buzzPollMsg {
 		text := buzzStr(obj, "content", "text", "body")
 		ts := buzzStr(obj, "created_at", "ts", "timestamp")
 		if text == "" && from == "" {
-			// channel list entry
 			if n := buzzStr(obj, "name"); n != "" {
 				msg.peers = append(msg.peers, n)
+			}
+			continue
+		}
+		// Nostr kind:0 profile content is JSON — skip as chat lines.
+		if strings.HasPrefix(strings.TrimSpace(text), "{") && from != "" && !strings.Contains(text, " ") {
+			if _, ok := peers[from]; !ok {
+				peers[from] = struct{}{}
 			}
 			continue
 		}
 		if from != "" {
 			peers[from] = struct{}{}
 		}
-		msg.lines = append(msg.lines, buzzLine{from: orDefault(from, "?"), text: text, ts: ts})
+		// Compact display for long hex pubkeys.
+		disp := from
+		if len(disp) == 64 && isHex64(disp) {
+			disp = disp[:8] + "…"
+		}
+		msg.lines = append(msg.lines, buzzLine{from: orDefault(disp, "?"), text: text, ts: ts})
 	}
 	for p := range peers {
-		msg.peers = append(msg.peers, p)
+		disp := p
+		if len(disp) == 64 && isHex64(disp) {
+			disp = disp[:8] + "…"
+		}
+		msg.peers = append(msg.peers, disp)
 	}
+	// Empty channel is success — not a parse error.
 	return msg
+}
+
+func decodeBuzzJSON(body string) (any, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return []any{}, nil
+	}
+	var raw any
+	if err := json.Unmarshal([]byte(body), &raw); err == nil {
+		return raw, nil
+	}
+	// NDJSON: one object per line.
+	var arr []any
+	for _, ln := range strings.Split(body, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		var item any
+		if json.Unmarshal([]byte(ln), &item) != nil {
+			return nil, fmt.Errorf("invalid json")
+		}
+		arr = append(arr, item)
+	}
+	if len(arr) == 0 {
+		return nil, fmt.Errorf("invalid json")
+	}
+	return arr, nil
+}
+
+// extractJSONPayload returns the first JSON array/object substring in s.
+func extractJSONPayload(s string) string {
+	s = strings.TrimSpace(s)
+	iArr := strings.IndexByte(s, '[')
+	iObj := strings.IndexByte(s, '{')
+	start := -1
+	endByte := byte(0)
+	switch {
+	case iArr >= 0 && (iObj < 0 || iArr < iObj):
+		start, endByte = iArr, ']'
+	case iObj >= 0:
+		start, endByte = iObj, '}'
+	default:
+		return ""
+	}
+	rest := s[start:]
+	if i := strings.LastIndexByte(rest, endByte); i >= 0 {
+		return rest[:i+1]
+	}
+	return rest
+}
+
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func buzzJSONArray(raw any) []any {
@@ -436,7 +569,7 @@ func buzzJSONArray(raw any) []any {
 	case []any:
 		return v
 	case map[string]any:
-		for _, key := range []string{"data", "messages", "items", "channels"} {
+		for _, key := range []string{"data", "messages", "items", "channels", "events", "results"} {
 			if a, ok := v[key].([]any); ok {
 				return a
 			}

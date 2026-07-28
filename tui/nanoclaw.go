@@ -411,6 +411,21 @@ until docker info >/dev/null 2>&1; do
   fi
   sleep 1
 done
+# Persist host DB + agent group folders on the named state volume so CLI
+# wirings and memory survive outer-container recreate (image FS is wiped).
+mkdir -p /opt/nanoclaw/store
+for d in data groups; do
+  if [ -L "/opt/nanoclaw/$d" ]; then
+    :
+  else
+    if [ -d "/opt/nanoclaw/$d" ] && [ ! -e "/opt/nanoclaw/store/$d" ]; then
+      mv "/opt/nanoclaw/$d" "/opt/nanoclaw/store/$d"
+    fi
+    mkdir -p "/opt/nanoclaw/store/$d"
+    rm -rf "/opt/nanoclaw/$d"
+    ln -sfn "/opt/nanoclaw/store/$d" "/opt/nanoclaw/$d"
+  fi
+done
 # OneCLI + .env → Olla. Failure is loud but non-fatal for the outer process:
 # NanoClaw still starts (Buzz/shell work), and agent spawns will surface the
 # OneCLI error clearly in logs if wiring did not complete.
@@ -425,9 +440,122 @@ if [ -n "${OILSAND_BUZZ_RELAY_URL:-}" ]; then
   echo "[entrypoint] joining Buzz at ${OILSAND_BUZZ_RELAY_URL} as ${OILSAND_BUZZ_NAME:-nanoclaw}"
   /usr/local/bin/oilsand-join-buzz.sh >> /var/log/oilsand-buzz.log 2>&1 &
 fi
+# Start the host, wait for CLI socket, ensure a cli/local agent exists, then
+# stay as PID 1 waiting on the host. Init is idempotent and non-fatal.
+(
+  i=0
+  while [ ! -S /opt/nanoclaw/data/cli.sock ]; do
+    i=$((i+1))
+    [ "$i" -ge 90 ] && exit 0
+    sleep 1
+  done
+  cd /opt/nanoclaw
+  export PATH="/opt/nanoclaw/bin:/usr/local/bin:$PATH"
+  if [ ! -f /opt/nanoclaw/store/oilsand-cli-agent.ok ]; then
+    echo "[entrypoint] initializing CLI channel agent…"
+    pnpm exec tsx scripts/init-cli-agent.ts \
+      --display-name "${OILSAND_CLI_USER:-operator}" \
+      --agent-name "${OILSAND_CLI_AGENT:-Nano}" \
+      >> /var/log/oilsand-cli-agent.log 2>&1 \
+      && touch /opt/nanoclaw/store/oilsand-cli-agent.ok \
+      || echo "[entrypoint] WARNING: init-cli-agent failed — see /var/log/oilsand-cli-agent.log" >&2
+  fi
+) &
 exec "$@"
 ENTRYPOINT_EOF
 RUN chmod +x /usr/local/bin/nanoclaw-entrypoint.sh
+# Interactive CLI-channel chat loop used by the TUI "open" action.
+COPY <<'CHAT_EOF' /usr/local/bin/oilsand-nanoclaw-chat.sh
+#!/bin/bash
+# Talk to the NanoClaw agent via the built-in CLI channel (data/cli.sock).
+# Upstream pnpm run chat is one-shot; this wraps it in a read loop.
+set -e
+cd /opt/nanoclaw
+export PATH="/opt/nanoclaw/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+export PS1="nanoclaw-chat:\w\$ "
+
+admin_shell() {
+  export PATH="/opt/nanoclaw/bin:$PATH"
+  export PS1="nanoclaw:\w\$ "
+  echo "Admin shell. ncl is one-shot admin (not chat):"
+  echo "  ncl help | ncl groups list | ncl sessions list"
+  echo "  exit returns to Oilsand TUI"
+  exec bash --norc -i
+}
+
+echo "Waiting for NanoClaw CLI channel (data/cli.sock)…"
+ok=0
+for _ in $(seq 1 90); do
+  if [ -S data/cli.sock ]; then ok=1; break; fi
+  sleep 1
+done
+if [ "$ok" -ne 1 ]; then
+  echo "CLI socket never appeared — host may be down. Falling back to admin shell."
+  echo "Check: docker logs <container>  and  /var/log/oilsand-olla.log"
+  admin_shell
+fi
+
+# Ensure an agent is wired to cli/local (idempotent).
+if [ ! -f store/oilsand-cli-agent.ok ] || [ ! -f scripts/init-cli-agent.ts ]; then
+  if [ -f scripts/init-cli-agent.ts ]; then
+    echo "Initializing CLI agent (first connect)…"
+    if pnpm exec tsx scripts/init-cli-agent.ts \
+         --display-name "${OILSAND_CLI_USER:-operator}" \
+         --agent-name "${OILSAND_CLI_AGENT:-Nano}" \
+         >> /var/log/oilsand-cli-agent.log 2>&1; then
+      mkdir -p store
+      touch store/oilsand-cli-agent.ok
+    else
+      echo "WARNING: init-cli-agent failed — see /var/log/oilsand-cli-agent.log"
+      echo "You can still try chatting; if nothing answers, use /shell and ncl."
+    fi
+  fi
+fi
+
+echo ""
+echo "NanoClaw CLI chat  (session persists server-side between lines)"
+echo "  type a message and press enter"
+echo "  /shell   admin shell (ncl)"
+echo "  /help    this text"
+echo "  /exit    leave (back to Oilsand TUI)"
+echo "First reply after a cold start can take 30-60s while the sandbox boots."
+echo ""
+
+send_chat() {
+  local msg="$1"
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm exec tsx scripts/chat.ts "$msg" || true
+  else
+    npx --yes tsx scripts/chat.ts "$msg" || true
+  fi
+}
+
+while true; do
+  printf 'you> '
+  IFS= read -r line || break
+  # trim leading/trailing whitespace without bashisms that need backticks
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [ -z "$line" ] && continue
+  case "$line" in
+    /exit|exit|quit|/q)
+      break
+      ;;
+    /shell)
+      admin_shell
+      ;;
+    /help|help)
+      echo "Commands: /shell  /help  /exit"
+      echo "Anything else is sent to the agent on cli/local."
+      ;;
+    *)
+      send_chat "$line"
+      echo ""
+      ;;
+  esac
+done
+CHAT_EOF
+RUN chmod +x /usr/local/bin/oilsand-nanoclaw-chat.sh
 VOLUME /opt/nanoclaw/store
 # Inner image/container storage. Must be a volume: the inner dockerd cannot
 # run overlay2 on top of the outer container's overlayfs.
@@ -538,38 +666,92 @@ echo "[deploy] Buzz join uses %s (see /var/log/oilsand-buzz.log); deploy Buzz fr
 	return b.String()
 }
 
-// nanoclawShellRC is the bash rc for an in-container session: it puts ncl on
-// PATH (for containers from an image built before the symlink existed) and
-// prints a short crib sheet, because ncl is not discoverable by itself.
+// nanoclawShellRC is the bash rc for the /shell fallback inside a Nanoclaw
+// container: ncl on PATH plus a short crib sheet.
 const nanoclawShellRC = `[ -f /etc/bash.bashrc ] && . /etc/bash.bashrc
 export PATH="/opt/nanoclaw/bin:$PATH"
 export PS1="nanoclaw:\w\$ "
 cd /opt/nanoclaw 2>/dev/null || true
-echo "NanoClaw container shell. ncl is the admin CLI - each call is one-shot:"
+echo "NanoClaw admin shell. ncl is one-shot admin (not chat):"
 echo "  ncl help              every resource and verb"
 echo "  ncl groups list       agent groups"
 echo "  ncl sessions list     active sessions"
 echo "  ncl tasks list        scheduled tasks"
-echo "Logs: docker logs (outside), /var/log/oilsand-buzz.log (Buzz),"
-echo "      /var/log/oilsand-olla.log (OneCLI → Olla wiring)."
+echo "Chat is oilsand-nanoclaw-chat.sh (TUI open). Logs:"
+echo "  /var/log/oilsand-buzz.log  /var/log/oilsand-olla.log"
+echo "  /var/log/oilsand-cli-agent.log"
 echo "exit or ctrl-d returns to the TUI."
 `
 
-// nanoclawConnectRemoteCmd opens an interactive shell inside a Nanoclaw
-// container.
-//
-// It deliberately does NOT run ncl directly. ncl is a one-shot admin client:
-// it sends a single request frame over the container's control socket
-// (data/ncl.sock) and exits, so running it bare as a "session" returns
-// immediately and the console looks like it died on open. An interactive bash
-// with ncl on PATH is the durable surface, and it also survives NanoClaw
-// itself being down — you land in a shell that can show you why.
+// nanoclawChatFallback is staged on connect when the image is older than the
+// baked-in oilsand-nanoclaw-chat.sh. Same loop as the image script: wait for
+// cli.sock, init CLI agent, then wrap one-shot pnpm chat in a read loop.
+const nanoclawChatFallback = `#!/bin/bash
+set -e
+cd /opt/nanoclaw
+export PATH="/opt/nanoclaw/bin:/usr/local/bin:$PATH"
+admin_shell() {
+  echo "$OILSAND_SHELL_RC_B64" | base64 -d > /tmp/.oilsand-rc
+  exec bash --rcfile /tmp/.oilsand-rc -i
+}
+echo "Waiting for NanoClaw CLI channel (data/cli.sock)…"
+ok=0
+for _ in $(seq 1 90); do
+  [ -S data/cli.sock ] && ok=1 && break
+  sleep 1
+done
+if [ "$ok" -ne 1 ]; then
+  echo "CLI socket never appeared — falling back to admin shell."
+  admin_shell
+fi
+if [ -f scripts/init-cli-agent.ts ] && [ ! -f store/oilsand-cli-agent.ok ]; then
+  echo "Initializing CLI agent (first connect)…"
+  pnpm exec tsx scripts/init-cli-agent.ts \
+    --display-name "${OILSAND_CLI_USER:-operator}" \
+    --agent-name "${OILSAND_CLI_AGENT:-Nano}" \
+    >> /var/log/oilsand-cli-agent.log 2>&1 \
+    && mkdir -p store && touch store/oilsand-cli-agent.ok \
+    || echo "WARNING: init-cli-agent failed — see /var/log/oilsand-cli-agent.log"
+fi
+echo ""
+echo "NanoClaw CLI chat  (session persists server-side between lines)"
+echo "  type a message and press enter"
+echo "  /shell   admin shell (ncl)   /help   /exit"
+echo "First reply after a cold start can take 30-60s."
+echo ""
+while true; do
+  printf 'you> '
+  IFS= read -r line || break
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [ -z "$line" ] && continue
+  case "$line" in
+    /exit|exit|quit|/q) break ;;
+    /shell) admin_shell ;;
+    /help|help) echo "Commands: /shell  /help  /exit" ;;
+    *) pnpm exec tsx scripts/chat.ts "$line" || true; echo "" ;;
+  esac
+done
+`
+
+// nanoclawConnectRemoteCmd opens the NanoClaw CLI-channel chat inside a
+// container. Upstream pnpm run chat is one-shot; we run oilsand-nanoclaw-chat.sh
+// (or a staged fallback) which loops it. ncl is never the session command —
+// it is a one-shot admin client and would exit immediately.
 func nanoclawConnectRemoteCmd(name string) string {
-	rc := base64.StdEncoding.EncodeToString([]byte(nanoclawShellRC))
-	// The rc file is staged inside the container, so this works on images
-	// built before the shell helper existed.
-	inner := "echo " + rc + " | base64 -d > /tmp/.oilsand-rc; exec bash --rcfile /tmp/.oilsand-rc -i"
-	return "sudo docker exec -it -w /opt/nanoclaw '" + shSingle(name) + "' bash -c \"" + inner + "\""
+	shellB64 := base64.StdEncoding.EncodeToString([]byte(nanoclawShellRC))
+	chatB64 := base64.StdEncoding.EncodeToString([]byte(nanoclawChatFallback))
+	// Prefer the image-baked launcher; otherwise stage the fallback loop.
+	// OILSAND_SHELL_RC_B64 lets /shell still get the admin crib sheet.
+	inner := "export OILSAND_SHELL_RC_B64='" + shellB64 + "'; " +
+		"if [ -x /usr/local/bin/oilsand-nanoclaw-chat.sh ]; then " +
+		"exec /usr/local/bin/oilsand-nanoclaw-chat.sh; " +
+		"fi; " +
+		"echo " + chatB64 + " | base64 -d > /tmp/oilsand-nanoclaw-chat.sh; " +
+		"chmod +x /tmp/oilsand-nanoclaw-chat.sh; " +
+		"exec /tmp/oilsand-nanoclaw-chat.sh"
+	return "sudo docker exec -it -w /opt/nanoclaw -e OILSAND_CLI_USER=operator -e OILSAND_CLI_AGENT=Nano '" +
+		shSingle(name) + "' bash -c \"" + inner + "\""
 }
 
 // nanoclawRecreateFragment recreates every existing nanoclaw container on the

@@ -31,14 +31,34 @@ func TestNanoclawImageShipsBuzzJoin(t *testing.T) {
 	}
 }
 
+// Open must land on the CLI-channel chat loop, not bare ncl or a plain shell.
+func TestNanoclawImageShipsCLIChat(t *testing.T) {
+	for _, want := range []string{
+		"/usr/local/bin/oilsand-nanoclaw-chat.sh",
+		"scripts/init-cli-agent.ts",
+		"scripts/chat.ts",
+		"data/cli.sock",
+		"you>",
+	} {
+		if !strings.Contains(nanoclawDockerfile, want) {
+			t.Errorf("Dockerfile missing CLI chat wiring %q", want)
+		}
+	}
+	// data/groups must survive outer-container recreate.
+	if !strings.Contains(nanoclawDockerfile, `ln -sfn "/opt/nanoclaw/store/$d" "/opt/nanoclaw/$d"`) {
+		t.Error("entrypoint does not persist data/groups on the state volume")
+	}
+}
+
 // nanoclawDockerfile is a Go raw string literal, so a stray backtick anywhere
 // inside it would end the literal and break the build in a confusing way.
 // Guard it, since the content is shell and JavaScript where backticks are
 // otherwise idiomatic.
 func TestNanoclawEmbeddedScriptsAvoidBackticks(t *testing.T) {
 	for name, s := range map[string]string{
-		"nanoclawDockerfile": nanoclawDockerfile,
-		"nanoclawShellRC":    nanoclawShellRC,
+		"nanoclawDockerfile":  nanoclawDockerfile,
+		"nanoclawShellRC":     nanoclawShellRC,
+		"nanoclawChatFallback": nanoclawChatFallback,
 	} {
 		if strings.Contains(s, "`") {
 			t.Errorf("%s contains a backtick, which cannot appear in a raw string literal", name)

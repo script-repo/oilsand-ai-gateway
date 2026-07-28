@@ -572,8 +572,8 @@ func (m *model) openNanoclawRemove() tea.Cmd {
 
 // openNanoclawConnect builds the connect picker for Nanoclaw from the live
 // container inventory (fetched just before this opens): which running instance
-// to open an interactive ncl session in. Stopped/crashed containers are omitted
-// because ncl can only attach to a live one.
+// to open the CLI-channel chat in. Stopped/crashed containers are omitted
+// because the host must be up for data/cli.sock.
 func (m *model) openNanoclawConnect() tea.Cmd {
 	var running []nanoclawInstance
 	for _, r := range m.nanoInst {
@@ -602,7 +602,7 @@ func (m *model) openNanoclawConnect() tea.Cmd {
 	m.modal = modalNanoConnect
 	m.form = huh.NewForm(huh.NewGroup(
 		huh.NewNote().Title("Connect to a Nanoclaw instance").
-			Description("Opens an interactive ncl session inside the container (ctrl+d / exit to leave). Esc cancels."),
+			Description("Opens CLI chat with the agent (type a message; /shell for ncl admin; /exit to leave). Esc cancels."),
 		huh.NewSelect[string]().Key("conntarget").Title("Which instance?").
 			Options(opts...).Value(&m.fConnectTarget),
 	)).WithWidth(formWidth(m)).WithShowHelp(true).WithTheme(huhTheme()).WithKeyMap(huhKM)

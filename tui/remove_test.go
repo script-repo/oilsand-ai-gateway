@@ -106,21 +106,26 @@ func TestRemoveNanoclawOpensInstancePicker(t *testing.T) {
 
 func TestNanoclawConnectRemoteCmd(t *testing.T) {
 	got := nanoclawConnectRemoteCmd("nanoclaw-03")
-	for _, want := range []string{"docker exec -it", "'nanoclaw-03'", "bash --rcfile"} {
+	for _, want := range []string{
+		"docker exec -it",
+		"'nanoclaw-03'",
+		"oilsand-nanoclaw-chat.sh", // preferred image launcher
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("connect cmd missing %q: %s", want, got)
 		}
 	}
-	// ncl is a one-shot admin client: it sends a single frame over the control
-	// socket and exits, so using it as the session command makes the console
-	// die the instant it opens. The session must be an interactive shell.
-	for _, bad := range []string{"tsx src/cli/client.ts", "pnpm exec tsx"} {
-		if strings.Contains(got, bad) {
-			t.Fatalf("connect cmd invokes the one-shot ncl client (%q): %s", bad, got)
-		}
+	// ncl is a one-shot admin client: never the session command.
+	if strings.Contains(got, "tsx src/cli/client.ts") {
+		t.Fatalf("connect cmd invokes the one-shot ncl client: %s", got)
 	}
+	// Fallback chat loop is staged for older images (before the baked launcher).
+	if enc := base64.StdEncoding.EncodeToString([]byte(nanoclawChatFallback)); !strings.Contains(got, enc) {
+		t.Error("connect cmd does not stage the chat fallback")
+	}
+	// /shell crib sheet is available via env for the fallback loop.
 	if enc := base64.StdEncoding.EncodeToString([]byte(nanoclawShellRC)); !strings.Contains(got, enc) {
-		t.Error("connect cmd does not stage the shell rc")
+		t.Error("connect cmd does not stage the shell rc for /shell")
 	}
 }
 

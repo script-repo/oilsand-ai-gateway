@@ -260,14 +260,21 @@ Deploying (press `d` on Nanoclaw in the **Agents** section):
 
 Deploying again — to the same worker or a different one — simply adds more instances; names
 never collide. Opening Nanoclaw (`enter`/`o`) refreshes the live inventory and lets you pick
-a **running instance** to drop into: it opens an **interactive shell inside that container**
-with NanoClaw's `ncl` admin CLI on `PATH`, plus a short crib sheet of common commands.
+a **running instance** to **chat with**: it attaches to NanoClaw's built-in **CLI channel**
+(`data/cli.sock`) via a read-loop around `pnpm`/`tsx scripts/chat.ts`. Type a line and press
+enter; session context persists server-side between lines. First reply after a cold start can
+take 30–60s while the agent sandbox boots.
 
-> `ncl` is a one-shot admin client — each call sends a single request frame over the
-> container's control socket (`data/ncl.sock`) and exits. That is why the session is a shell
-> rather than `ncl` itself: running `ncl` as the session command returns immediately and the
-> console looks like it died the moment it opened. From the shell, run `ncl help`,
-> `ncl groups list`, `ncl sessions list`, `ncl tasks list`, and so on.
+| In chat | Action |
+|---------|--------|
+| any text | send to the agent on `cli/local` |
+| `/shell` | admin bash with `ncl` on `PATH` |
+| `/help` | short crib sheet |
+| `/exit` | leave back to the Oilsand TUI |
+
+> `ncl` remains the **admin** CLI (one-shot over `data/ncl.sock`) — use `/shell` then
+> `ncl groups list`, `ncl sessions list`, etc. The host auto-runs
+> `scripts/init-cli-agent.ts` once so an agent is wired to the CLI channel.
 
 Before handing over the terminal the TUI checks the container is actually running. If it
 isn't, you get a notice naming the instance, its state and its last log line, instead of a
