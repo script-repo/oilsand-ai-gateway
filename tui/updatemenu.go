@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -188,8 +189,10 @@ func (m *model) updateAgentsPlan() tea.Cmd {
 		})
 	}
 	if host := orDefault(m.agentReg["Hermes"], m.firstWorkerHost()); host != "" {
-		script := fmt.Sprintf("echo '[update] re-launching hermes'\nollama launch hermes --yes --model %s </dev/null || true\n", model) +
-			m.hermesOllaConfigScript(model)
+		script := "set -e\nexport HERMES_NONINTERACTIVE=1\n" + depsBootstrap +
+			strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model) +
+			m.hermesOllaConfigScript(model) +
+			"echo '[update] Hermes updated and pointed at Olla'\n"
 		steps = append(steps, updateStep{
 			title: "Update Hermes on " + host, host: host, user: user, pass: m.sshPass, script: script,
 		})
@@ -294,9 +297,11 @@ func (m *model) updateAgentsSteps() []updateStep {
 		})
 	}
 	if host := orDefault(m.agentReg["Hermes"], m.firstWorkerHost()); host != "" {
+		script := "set -e\nexport HERMES_NONINTERACTIVE=1\n" + depsBootstrap +
+			strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model) +
+			m.hermesOllaConfigScript(model)
 		steps = append(steps, updateStep{
-			title: "Update Hermes on " + host, host: host, user: user, pass: m.sshPass,
-			script: fmt.Sprintf("ollama launch hermes --yes --model %s </dev/null || true\n", model) + m.hermesOllaConfigScript(model),
+			title: "Update Hermes on " + host, host: host, user: user, pass: m.sshPass, script: script,
 		})
 	}
 	for _, host := range m.nanoclawHosts() {

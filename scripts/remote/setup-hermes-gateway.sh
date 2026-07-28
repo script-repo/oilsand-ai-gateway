@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Unattended Hermes + Telegram gateway setup for a Rocky Linux worker.
+# Unattended Hermes + Telegram gateway setup for a Rocky/Ubuntu worker.
 #
 # Mirrors the script the TUI generates (tui/agents.go) so the same flow can be
 # run by hand outside the TUI. It:
 #   1. bootstraps deps (git, Node.js, npm prefix on PATH),
-#   2. installs the Hermes CLI via `ollama launch` if missing,
+#   2. installs the Hermes CLI via the official installer if missing,
 #   3. points Hermes at an Olla OpenAI endpoint (custom provider),
 #   4. writes the Telegram credentials to ~/.hermes/.env (mode 600),
 #   5. installs + starts the messaging gateway non-interactively, and
@@ -37,15 +37,33 @@ log() { printf '[setup-hermes] %s\n' "$*"; }
 
 # --- 1. deps: git, node, npm global prefix on PATH --------------------------
 log "ensuring deps (git, Node.js, npm prefix)…"
+. /etc/os-release 2>/dev/null || true
 if ! command -v git >/dev/null 2>&1; then
-  sudo dnf install -y git >/dev/null 2>&1 || sudo yum install -y git >/dev/null 2>&1 || true
+  case "${ID:-}" in
+    ubuntu|debian)
+      sudo apt-get update -y >/dev/null 2>&1 || true
+      sudo apt-get install -y git
+      ;;
+    *)
+      sudo dnf install -y git >/dev/null 2>&1 || sudo yum install -y git
+      ;;
+  esac
 fi
-if ! command -v node >/dev/null 2>&1; then
-  curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - >/dev/null 2>&1 || true
-  sudo dnf install -y nodejs >/dev/null 2>&1 || sudo yum install -y nodejs >/dev/null 2>&1 || true
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  case "${ID:-}" in
+    ubuntu|debian)
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+      sudo apt-get install -y nodejs
+      ;;
+    *)
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
+      sudo dnf install -y nodejs >/dev/null 2>&1 || sudo yum install -y nodejs
+      ;;
+  esac
 fi
 if command -v npm >/dev/null 2>&1; then
   npm config set prefix "$HOME/.npm-global" >/dev/null 2>&1 || true
+  mkdir -p "$HOME/.npm-global/bin" "$HOME/.local/bin"
   case ":$PATH:" in
     *":$HOME/.npm-global/bin:"*) : ;;
     *) export PATH="$HOME/.npm-global/bin:$PATH"
@@ -53,14 +71,27 @@ if command -v npm >/dev/null 2>&1; then
          echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.bashrc" ;;
   esac
 fi
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || \
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 
 # --- 2. install hermes if missing ------------------------------------------
 if ! command -v hermes >/dev/null 2>&1; then
-  log "installing hermes (headless, model $HERMES_OLLA_MODEL)…"
-  ollama launch hermes --yes --model "$HERMES_OLLA_MODEL" </dev/null || true
+  log "installing hermes (official installer)…"
+  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 fi
-HERMES_BIN="$(command -v hermes || echo "$HOME/.local/bin/hermes")"
+if ! command -v hermes >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
+  log "hermes still missing; trying ollama launch hermes…"
+  ollama launch hermes --yes --model "$HERMES_OLLA_MODEL" </dev/null || true
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+fi
+if ! command -v hermes >/dev/null 2>&1; then
+  log "ERROR: hermes not found on PATH after install"
+  exit 1
+fi
+HERMES_BIN="$(command -v hermes)"
+log "hermes: $HERMES_BIN"
 
 # --- 3. point hermes at Olla -----------------------------------------------
 log "pointing hermes at Olla ($HERMES_OLLA_BASE)…"

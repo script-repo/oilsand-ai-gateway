@@ -147,17 +147,18 @@ Sections:
 * **Agents** — deploy and open terminal AI agents over SSH on the managed hosts:
   * **Crush** (gateway) — Charm's coding agent, installed on the Olla server and pointed at the
     OpenAI endpoint so it load-balances across the whole pool.
-  * **OpenClaw** and **Hermes** (worker) — installed on a chosen worker via `ollama launch`;
-    Hermes can also set up its Telegram messaging gateway unattended (`e` to configure).
+  * **OpenClaw** and **Hermes** (worker) — OpenClaw via `ollama launch`; Hermes via the official
+    installer (with `ollama launch` as fallback). Hermes can also set up its Telegram messaging
+    gateway unattended (`e` to configure).
   * **Nanoclaw** (worker) — a lightweight agent that runs as **Docker containers** on any
     worker; deploy it multiple times (or set **Instances** > 1) to run several isolated
     instances side-by-side on the same node. See below.
   * **OmniRoute** (worker) — the free [OmniRoute](https://github.com/diegosouzapw/OmniRoute) AI
-    gateway, deployed from its official Docker image as a single service container on a chosen
-    worker. It exposes an OpenAI-compatible API and a web dashboard on port `20128` and fans out
-    to 200+ upstream providers with failover; open its dashboard URL to add providers/keys. Its
-    SQLite state lives in the named `omniroute-data` volume, so redeploys and updates keep it.
-    Opening it (`enter`/`o`) prints the reachable URL and follows the container logs.
+    gateway, deployed from its official Docker image as **redis + app** on a shared Docker
+    network. Dashboard on `20128`, OpenAI-compatible API on `20129`, live WS on `20132`. First
+    deploy writes production secrets to `/opt/oilsand/omniroute.env`. SQLite state lives in the
+    named `omniroute-data` volume. Opening it (`enter`/`o`) prints the reachable URLs and
+    follows the container logs.
 
   `enter`/`o` opens an agent, `d` deploys one; worker agents prompt for the target worker.
   `i` shows the **Nanoclaw instance overview**: every container across every worker Nanoclaw
@@ -169,11 +170,10 @@ Sections:
   delete one instance on one worker, or all of them everywhere, with a toggle for whether the
   per-instance state volume goes too. The registration is reconciled against what is actually
   left on the workers, so the ✓ badge clears exactly when the last install disappears.
-* **Hub** — the **Agent Hub**, a shared chat channel for the deployed agents (see below).
-  The TUI joins the channel as `operator`: it shows the live feed (with recent history
-  replayed on connect), who is online, and a composer to talk to the agents. `enter` sends,
-  `@name …` sends a direct message to one agent, `ctrl+r` reconnects, `ctrl+d` deploys the
-  hub service onto the gateway host.
+* **Buzz** — a self-hosted [block/buzz](https://github.com/block/buzz) relay on the gateway
+  (see below). The TUI joins as `operator` via buzz-cli: live channel feed, peers seen in
+  traffic, and a composer. `enter` sends, `ctrl+r` refreshes, `ctrl+d` deploys/updates the
+  Buzz compose stack on the gateway host.
 * **Load** — load-balancing visualization: per-worker cumulative request share,
   active-connection bars, a gateway throughput sparkline, and a `◀ busiest` marker on the worker
   currently taking the most load.
@@ -195,9 +195,9 @@ Sections:
   each streaming its output into the Output pane below:
   1. **Update local machine** — downloads and runs the latest installer for this OS.
   2. **Update gateway (Olla)** — SSHes to the gateway and reinstalls the latest Olla.
-  3. **Update agents** — upgrades Crush (gateway), re-launches OpenClaw and Hermes (workers),
-     rebuilds + restarts Nanoclaw containers, and pulls + recreates the OmniRoute container
-     where deployed.
+  3. **Update agents** — upgrades Crush (gateway), re-launches OpenClaw, reinstalls/repoints
+     Hermes, rebuilds + recreates Nanoclaw containers, and pulls + recreates OmniRoute
+     (redis + app) where deployed.
   4. **Update image** — changes the image used for new deployments (live PC image dropdown), and
      can **seed a new image into Prism Central**: choose a built-in **preset** (Rocky Linux 9,
      Rocky Linux 10, Ubuntu 24.04) or paste any qcow2/img **URL** (with an optional name). It is
@@ -245,11 +245,18 @@ Deploying (press `d` on Nanoclaw in the **Agents** section):
 3. Each instance gets the next free auto-incremented container name (`nanoclaw-01`,
    `nanoclaw-02`, …) and its **own named state volume** (`oilsand-nanoclaw-NN`), started
    with `--restart unless-stopped` so instances survive reboots.
-4. Every container is pointed at the **Olla OpenAI endpoint** (via `OPENAI_BASE_URL` /
-   `NANOCLAW_MODEL` env vars), so all instances load-balance across the whole worker pool,
-   and receives the **Agent Hub** coordinates (`OILSAND_HUB_HOST`, `OILSAND_HUB_PORT`,
-   `OILSAND_HUB_NAME`). A small hub bridge baked into the image reads those on startup and
-   joins the shared channel, so instances appear in the **Hub** roster on their own.
+4. Every container is wired to **Olla for inference** and **Buzz** for presence:
+   * **Inference (OneCLI → Olla).** On first boot the image installs [OneCLI](https://onecli.sh)
+     (required by upstream NanoClaw for agent container spawns), writes `.env` with
+     `ANTHROPIC_BASE_URL=http://<gateway>/olla/anthropic` plus `ONECLI_URL` /
+     `ONECLI_API_KEY`, and registers a OneCLI secret (`OilsandOlla`) whose host-pattern
+     matches the gateway hostname so the vault injects `Authorization: Bearer <token>`
+     on the wire. The Claude provider baked into the image forwards that base URL into
+     agent containers. Progress/errors land in `/var/log/oilsand-olla.log`.
+   * **Buzz.** `OILSAND_BUZZ_RELAY_URL` / `OILSAND_BUZZ_CHANNEL` / `OILSAND_BUZZ_NAME` (and
+     optional `OILSAND_BUZZ_CHANNEL_ID`) are set at deploy time; a join script + buzz-cli
+     baked into the image keep presence on the default `oilsand` channel so instances show
+     up in the **Buzz** section.
 
 Deploying again — to the same worker or a different one — simply adds more instances; names
 never collide. Opening Nanoclaw (`enter`/`o`) refreshes the live inventory and lets you pick
@@ -281,61 +288,52 @@ sudo docker ps --filter name=nanoclaw-            # list instances
 sudo docker logs -f nanoclaw-02                   # follow one instance
 sudo docker exec -it nanoclaw-02 bash             # shell inside it (ncl is on PATH)
 sudo docker exec -it nanoclaw-02 ncl groups list  # or run one ncl command directly
-sudo docker exec nanoclaw-02 cat /var/log/oilsand-hub-bridge.log   # hub join/retry log
+sudo docker exec nanoclaw-02 cat /var/log/oilsand-buzz.log         # Buzz join/presence log
+sudo docker exec nanoclaw-02 cat /var/log/oilsand-olla.log         # OneCLI → Olla wiring
 sudo docker rm -f nanoclaw-02                     # remove an instance
 sudo docker volume rm oilsand-nanoclaw-02         # …and its state
 ```
 
-### Agent Hub — a chat channel between the agents
+Existing Nanoclaw workers need an **image rebuild** to pick this up: deploy again (or
+**Update ▸ Update agents**), which rebuilds `oilsand/nanoclaw` from the new Dockerfile and
+recreates containers. After that, confirm wiring with the olla log above — you should see
+`OneCLI secret OilsandOlla` and `Olla wiring complete`.
 
-The **Hub** section gives the deployed agents a shared chat channel on the local network,
-with the TUI as a first-class participant. The hub itself is a tiny dependency-free service
-(Python 3 stdlib, ~100 lines) installed on the **gateway host** as the `oilsand-hub` systemd
-unit, listening on TCP **:40117**. Press `ctrl+d` in the Hub section to deploy it (idempotent —
-re-running updates the service); entering the section auto-connects.
+### Buzz — shared workspace for humans and agents
 
-The protocol is **one JSON object per line over TCP**, so anything that can open a socket —
-a Node agent, a Python script, even `nc` — can join:
+The **Buzz** section is a self-hosted [block/buzz](https://github.com/block/buzz) relay on the
+**gateway host**, plus an in-TUI chat surface driven by `buzz-cli`. Press `ctrl+d` in Buzz to
+deploy it (idempotent): the TUI stages upstream `deploy/compose` under `/opt/oilsand/buzz`,
+writes a LAN-friendly `.env` (no `CHANGE_ME` left), starts the stack via `./run.sh start`,
+installs buzz-cli from the image, opens firewall port **3000**, and ensures a default channel
+named `oilsand`. Operator credentials are stored as `operator.key` / `channel.id` on the
+gateway and cached in the TUI settings file.
 
-```
-client → hub   {"type":"hello","name":"nanoclaw-01","kind":"agent"}     first frame
-               {"type":"msg","text":"…","to":"<optional peer>"}
-               {"type":"ping"}
-hub → client   {"type":"welcome","name":"<assigned>","peers":[…],"history":[…]}
-               {"type":"msg","from":"…","to":"…","text":"…","ts":"…"}
-               {"type":"join","name":"…"} / {"type":"leave","name":"…"}
-               {"type":"pong"}
-```
-
-Messages are broadcast to every connected client; a `to` field addresses one peer (the sender
-gets an echo). Duplicate names are auto-suffixed (`nanoclaw-01-2`), and the last 200 messages
-are replayed on join so late joiners (and the operator) get recent context. Try it from any
-host on the LAN:
+Entering the section auto-loads credentials (SSH or local) and polls the channel every few
+seconds. `enter` sends a message; `ctrl+r` refreshes the feed.
 
 ```bash
-( printf '{"type":"hello","name":"tester"}\n{"type":"msg","text":"hi agents"}\n'; sleep 2 ) \
-  | nc <gateway-ip> 40117
+# On the gateway after deploy
+export BUZZ_RELAY_URL=http://127.0.0.1:3000
+export BUZZ_PRIVATE_KEY=$(sudo cat /opt/oilsand/buzz/operator.key)
+buzz channels list
+buzz messages get --channel "$(sudo cat /opt/oilsand/buzz/channel.id)" --limit 20
+buzz messages send --channel "$(sudo cat /opt/oilsand/buzz/channel.id)" --content 'hi agents'
 ```
 
-In the TUI, the Hub feed shows each message with its sender (colored per agent) and timestamp;
-join/leave events render as dim system lines and the online roster is shown under the feed.
-Type to broadcast, or start a line with `@nanoclaw-01 ` to address a single agent.
+**How Nanoclaw instances join.** Deploy passes `OILSAND_BUZZ_RELAY_URL=http://<gateway>:3000`
+and a per-instance `OILSAND_BUZZ_NAME`. The image copies `buzz` from `ghcr.io/block/buzz` and
+runs `oilsand-join-buzz.sh` in the background: it generates a Nostr key on the state volume,
+joins the `oilsand` channel, and keeps presence online. This is **presence only** — it does
+not feed the channel into the agent's reasoning. Use in-container `ncl` for administration.
 
-**How Nanoclaw instances join.** Upstream NanoClaw knows nothing about this hub, so passing
-`OILSAND_HUB_*` into a container achieves nothing by itself. The TUI's Nanoclaw image
-therefore bakes in a small dependency-free Node bridge that reads those variables at startup,
-sends the `hello` frame, keeps the connection alive, reconnects with backoff, and answers a
-direct message with a status line. It is a **presence bridge**: it puts the instance on the
-roster and proves it is alive — it does not pipe the channel into the agent's reasoning. Use
-the in-container `ncl` CLI for actual administration.
+If the feed is empty: deploy Buzz with `ctrl+d`, then **re-deploy Nanoclaw** so the image is
+rebuilt with buzz-cli/join and containers are recreated. Check
+`sudo docker exec <name> cat /var/log/oilsand-buzz.log` on the worker; the worker must reach
+the gateway on TCP **3000**.
 
-If the roster is empty: deploy the hub with `ctrl+d`, then **re-deploy Nanoclaw** so the image
-is rebuilt with the bridge and existing containers are recreated on it. `sudo docker exec
-<name> cat /var/log/oilsand-hub-bridge.log` on the worker shows the join attempts, and the
-worker must be able to reach the gateway on TCP 40117.
-
-The channel is an open party line for a trusted LAN — there is no auth or encryption, so
-don't put secrets on it.
+First-time Buzz deploy is intended for a trusted LAN (`BUZZ_REQUIRE_AUTH_TOKEN=false` and
+open membership). Tighten `.env` under `/opt/oilsand/buzz` before exposing it beyond the lab.
 
 ### Install Olla locally (no Nutanix VM)
 

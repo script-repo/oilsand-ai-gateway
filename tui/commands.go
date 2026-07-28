@@ -395,9 +395,17 @@ type tuiSettings struct {
 	Agents        map[string]string   `json:"agents"`      // agent name -> most recent deployed host
 	AgentHosts    map[string][]string `json:"agent_hosts"` // agent name -> every host it was deployed on
 	Hermes        hermesSettings      `json:"hermes"`
+	Buzz          buzzSettings        `json:"buzz"`
 	CustomDeploys []customDeploy      `json:"custom_deploys"` // user-defined deployment types
 	CustomSeeded  bool                `json:"custom_seeded"`  // built-in custom deploys seeded once (so deletes stick)
 	VMImages      map[string]string   `json:"vm_images"`      // VM name -> source image name
+}
+
+// buzzSettings persists the operator key and default channel id for the Buzz
+// TUI feed (written after deploy / credential fetch).
+type buzzSettings struct {
+	OperatorKey string `json:"operator_key"`
+	ChannelID   string `json:"channel_id"`
 }
 
 // customDeploy is a user-defined Nutanix deployment type: a friendly name plus
@@ -578,6 +586,14 @@ func saveAgentReg(path string, reg map[string]string, hosts map[string][]string)
 func saveHermesCfg(path string, h hermesSettings) error {
 	s := loadSettings(path)
 	s.Hermes = h
+	return saveSettings(path, s)
+}
+
+// saveBuzzCfg persists Buzz operator credentials used by the TUI feed.
+func saveBuzzCfg(path, opKey, channelID string) error {
+	s := loadSettings(path)
+	s.Buzz.OperatorKey = opKey
+	s.Buzz.ChannelID = channelID
 	return saveSettings(path, s)
 }
 

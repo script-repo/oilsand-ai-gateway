@@ -13,59 +13,109 @@ import "strings"
 
 const (
 	omnirouteImage = "diegosouzapw/omniroute:latest"
-	// omniroutePort serves both the OpenAI-compatible API (/v1) and the web
-	// dashboard; it is the upstream default.
-	omniroutePort = "20128"
+	// omniroutePort serves the dashboard; API and live-WS use sibling ports.
+	omniroutePort    = "20128"
+	omnirouteAPIPort = "20129"
+	omnirouteWSPort  = "20132"
+	omnirouteEnvPath = "/opt/oilsand/omniroute.env"
+	omnirouteNet     = "omniroute-net"
 )
 
-// omnirouteRunFragment (re)creates the single omniroute service container from
-// $IMG, replacing any previous one so repeated deploys/updates converge on the
-// running image. The named volume omniroute-data keeps the SQLite database and
-// provider/key config across recreations (upstream persists to /app/data).
-// Expects $IMG to be set and contains no fmt verbs, so it concatenates into
-// Sprintf formats and plain builders alike.
-const omnirouteRunFragment = `sudo docker rm -f omniroute >/dev/null 2>&1 || true
+// omnirouteEnvFragment writes a persistent env file with production secrets
+// when missing. Upstream requires OMNIROUTE_WS_BRIDGE_SECRET (and related keys)
+// in Docker; without them the process often dies immediately after start.
+const omnirouteEnvFragment = `ENVF='` + omnirouteEnvPath + `'
+sudo mkdir -p /opt/oilsand
+if [ ! -f "$ENVF" ]; then
+  echo "[deploy] writing $ENVF (first-time secrets)…"
+  umask 077
+  {
+    echo "OMNIROUTE_WS_BRIDGE_SECRET=$(openssl rand -base64 32 | tr -d '\n')"
+    echo "JWT_SECRET=$(openssl rand -hex 32)"
+    echo "API_KEY_SECRET=$(openssl rand -hex 32)"
+    echo "STORAGE_ENCRYPTION_KEY=$(openssl rand -hex 32)"
+    echo "STORAGE_ENCRYPTION_KEY_VERSION=v1"
+    echo "MACHINE_ID_SALT=$(openssl rand -hex 16)"
+    echo "INITIAL_PASSWORD=oilsand-$(openssl rand -hex 4)"
+    echo "PORT=` + omniroutePort + `"
+    echo "DASHBOARD_PORT=` + omniroutePort + `"
+    echo "API_PORT=` + omnirouteAPIPort + `"
+    echo "LIVE_WS_PORT=` + omnirouteWSPort + `"
+    echo "HOSTNAME=0.0.0.0"
+    echo "DATA_DIR=/app/data"
+    echo "NODE_ENV=production"
+    echo "REDIS_URL=redis://omniroute-redis:6379"
+  } | sudo tee "$ENVF" >/dev/null
+  sudo chmod 600 "$ENVF"
+  echo "[deploy] initial dashboard password is in $ENVF (INITIAL_PASSWORD)"
+fi
+`
+
+// omnirouteRunFragment (re)creates redis + the omniroute service on a shared
+// network. Expects $IMG to be set. Verifies the app container is running and
+// dumps logs on failure so the TUI surfaces a real cause (not bare exit 1).
+const omnirouteRunFragment = `sudo docker network create ` + omnirouteNet + ` >/dev/null 2>&1 || true
+sudo docker rm -f omniroute-redis >/dev/null 2>&1 || true
+sudo docker run -d --name omniroute-redis --restart unless-stopped \
+  --network ` + omnirouteNet + ` \
+  -v omniroute-redis-data:/data \
+  redis:7-alpine redis-server --save 60 1 --loglevel warning >/dev/null
+sudo docker rm -f omniroute >/dev/null 2>&1 || true
 sudo docker run -d --name omniroute --restart unless-stopped --stop-timeout 40 \
-  -p ` + omniroutePort + `:` + omniroutePort + ` -v omniroute-data:/app/data "$IMG" >/dev/null
+  --network ` + omnirouteNet + ` \
+  --env-file ` + omnirouteEnvPath + ` \
+  -e REDIS_URL=redis://omniroute-redis:6379 \
+  -p ` + omniroutePort + `:` + omniroutePort + ` \
+  -p ` + omnirouteAPIPort + `:` + omnirouteAPIPort + ` \
+  -p ` + omnirouteWSPort + `:` + omnirouteWSPort + ` \
+  -v omniroute-data:/app/data \
+  "$IMG" >/dev/null
+# Give the entrypoint a moment, then require a live container.
+sleep 3
+if [ "$(sudo docker inspect -f '{{.State.Running}}' omniroute 2>/dev/null || echo false)" != "true" ]; then
+  echo "[deploy] ERROR: omniroute container is not running — recent logs:" >&2
+  sudo docker logs --tail 80 omniroute >&2 || true
+  exit 1
+fi
 sudo docker ps --filter name=omniroute --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 `
 
-// omnirouteDeployScript installs Docker on the worker (idempotent), pulls the
-// OmniRoute image, and starts it as a detached service exposing the dashboard +
-// OpenAI-compatible API on omniroutePort. It ends by printing the reachable URL
-// (the worker's own primary IP) so the operator can open it to add providers.
+// omnirouteDeployScript installs Docker on the worker (idempotent), writes
+// secrets, pulls the OmniRoute image, and starts redis + the gateway service.
 func (m *model) omnirouteDeployScript() string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	b.WriteString(dockerBootstrap)
+	b.WriteString(omnirouteEnvFragment)
 	b.WriteString("IMG='" + omnirouteImage + "'\n")
 	b.WriteString(`echo "[deploy] pulling $IMG…"
 sudo docker pull "$IMG"
-echo "[deploy] starting omniroute service…"
+echo "[deploy] starting omniroute-redis + omniroute…"
 `)
 	b.WriteString(omnirouteRunFragment)
 	b.WriteString(`IP=$(hostname -I 2>/dev/null | cut -d" " -f1)
-echo "[deploy] OmniRoute is up — dashboard + OpenAI-compatible API at http://${IP:-<this-host>}:` + omniroutePort + `"
-echo "[deploy] open that URL to add providers/keys. You can close this window."
+echo "[deploy] OmniRoute is up — dashboard at http://${IP:-<this-host>}:` + omniroutePort + `"
+echo "[deploy] OpenAI-compatible API also on :` + omnirouteAPIPort + ` (see docs). You can close this window."
 `)
 	return b.String()
 }
 
 // omnirouteUpdateScript pulls the latest OmniRoute image and recreates the
-// container on it; the named data volume preserves configuration across the
-// swap. Shared by the Update section (agents / update-all).
+// containers; named volumes preserve configuration across the swap.
 func omnirouteUpdateScript() string {
-	return "echo '[update] updating omniroute'\nIMG='" + omnirouteImage + "'\n" +
+	return "set -e\n" +
+		"echo '[update] updating omniroute'\n" +
+		omnirouteEnvFragment +
+		"IMG='" + omnirouteImage + "'\n" +
 		"sudo docker pull \"$IMG\"\n" + omnirouteRunFragment
 }
 
 // omnirouteConsoleScript is what "open" runs for OmniRoute: print the reachable
-// dashboard/API URL, show container status, then follow the service logs (it is
-// a background service, not an interactive CLI). Written without single quotes
-// so loginShell can wrap it in `bash -lc '…'`.
+// dashboard/API URL, show container status, then follow the service logs.
 func omnirouteConsoleScript() string {
 	return `IP=$(hostname -I 2>/dev/null | cut -d" " -f1)
-echo "OmniRoute dashboard + OpenAI-compatible API: http://${IP:-localhost}:` + omniroutePort + `"
+echo "OmniRoute dashboard: http://${IP:-localhost}:` + omniroutePort + `"
+echo "OpenAI-compatible API: http://${IP:-localhost}:` + omnirouteAPIPort + `"
 sudo docker ps -a --filter name=omniroute --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 echo "[following omniroute logs - Ctrl-C to exit]"
 sudo docker logs -f --tail 50 omniroute`

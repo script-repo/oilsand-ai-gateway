@@ -16,8 +16,8 @@ import (
 // so several isolated instances can share the same VM. The image is built once
 // per worker from the upstream NanoClaw repo; each instance gets an
 // auto-incremented name (nanoclaw-01, nanoclaw-02, …) and its own state volume,
-// and is pointed at the Olla OpenAI endpoint so it load-balances across the
-// whole pool.
+// and is pointed at the Olla Anthropic endpoint (via OneCLI) so agents
+// load-balance across the whole pool.
 
 const nanoclawImage = "oilsand/nanoclaw:latest"
 
@@ -42,10 +42,14 @@ const nanoclawDockerfileLabel = "oilsand.dockerfile-sha256"
 // those paths against the host, where they don't exist.
 const nanoclawDockerfile = `# Nanoclaw agent image, built by the Oilsand AI Gateway TUI.
 # Every deployed instance is a separate container from this one image.
+FROM ghcr.io/block/buzz:main AS buzzcli
 FROM node:22-bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates curl \
+ && apt-get install -y --no-install-recommends git ca-certificates curl openssl \
  && rm -rf /var/lib/apt/lists/*
+# buzz-cli for Buzz relay presence (path may vary by image tag).
+COPY --from=buzzcli /usr/local/bin/buzz /usr/local/bin/buzz
+RUN chmod +x /usr/local/bin/buzz 2>/dev/null || true
 # Inner Docker engine: NanoClaw refuses to start without a container runtime
 # ("docker info" must succeed inside this container) and uses it to sandbox
 # its agents. Requires the instance to run with --privileged.
@@ -55,6 +59,29 @@ RUN curl -fsSL https://get.docker.com | sh \
 RUN corepack enable || npm install -g pnpm
 RUN git clone --depth 1 https://github.com/qwibitai/nanoclaw /opt/nanoclaw
 WORKDIR /opt/nanoclaw
+# Oilsand Olla provider: same shape as upstream src/providers/claude.ts, but
+# always registered so a deploy that writes ANTHROPIC_BASE_URL into .env
+# actually reaches agent containers. Without this import, trunk's empty
+# providers/index.ts never loads the custom-endpoint path and agents keep
+# aiming at api.anthropic.com. Built into dist/ below.
+COPY <<'OLLA_PROVIDER_EOF' src/providers/oilsand-olla.ts
+import { readEnvFile } from '../env.js';
+import { registerProviderContainerConfig } from './provider-container-registry.js';
+
+registerProviderContainerConfig('claude', () => {
+  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
+  const env: Record<string, string> = {};
+  if (dotenv.ANTHROPIC_BASE_URL) {
+    env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
+    // Placeholder: OneCLI's HTTP/HTTPS proxy rewrites Authorization on the
+    // wire using the vault secret keyed to the Olla hostname.
+    env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+  }
+  return { env };
+});
+OLLA_PROVIDER_EOF
+RUN grep -q "oilsand-olla" src/providers/index.ts \
+ || printf "\nimport './oilsand-olla.js';\n" >> src/providers/index.ts
 RUN pnpm install --frozen-lockfile || pnpm install
 RUN pnpm run build
 # Put the ncl admin CLI on PATH. Upstream's setup normally symlinks bin/ncl
@@ -67,94 +94,303 @@ RUN ln -sf /opt/nanoclaw/bin/ncl /usr/local/bin/ncl
 # just-built version marks this image as a sanctioned install. Guarded so
 # older upstream revisions without the tripwire still build.
 RUN [ ! -f scripts/upgrade-state.ts ] || pnpm exec tsx scripts/upgrade-state.ts set
-# Agent Hub bridge. Upstream NanoClaw knows nothing about the Oilsand hub
-# protocol (hub.go), so passing OILSAND_HUB_* into the container achieves
-# nothing on its own — without this process no instance ever appears on the
-# channel. Node only, no dependencies; .cjs keeps it CommonJS regardless of
-# any package.json "type" nearby.
-COPY <<'HUBBRIDGE_EOF' /usr/local/bin/oilsand-hub-bridge.cjs
-// Registers this Nanoclaw container on the Oilsand Agent Hub and keeps the
-// connection up, so the TUI's Hub tab lists it as a peer. Reconnects with
-// backoff; answers direct messages with a short liveness/status line.
-const net = require('net');
-const os = require('os');
+# Wire OneCLI + .env so NanoClaw agents call Olla. Trunk refuses to spawn
+# agent containers unless OneCLI's proxy is applied, and the Claude provider
+# only redirects to a custom endpoint when ANTHROPIC_BASE_URL is in .env.
+# This script is idempotent and runs every start (state lives in DinD volumes).
+COPY <<'OLLA_CFG_EOF' /usr/local/bin/oilsand-configure-olla.sh
+#!/bin/bash
+set -euo pipefail
+log() { printf '[oilsand-olla] %s\n' "$*"; }
 
-const HOST = process.env.OILSAND_HUB_HOST || '';
-const PORT = parseInt(process.env.OILSAND_HUB_PORT || '40117', 10);
-const NAME = process.env.OILSAND_HUB_NAME || 'nanoclaw';
-const PING_MS = 30000;
-const BACKOFF_MAX = 30000;
+cd /opt/nanoclaw
+mkdir -p /opt/nanoclaw/store
 
-// No hub configured: exit quietly so the entrypoint stays clean.
-if (!HOST) { process.exit(0); }
+# Persist .env on the named state volume so ONECLI_API_KEY and friends survive
+# outer-container recreate (only /opt/nanoclaw/store and inner docker volumes
+# are durable; the image filesystem is wiped on every recreate).
+ENV_FILE="/opt/nanoclaw/store/oilsand-nanoclaw.env"
+touch "$ENV_FILE"
+ln -sfn "$ENV_FILE" /opt/nanoclaw/.env
 
-// The hub may hand back a de-duplicated name (e.g. "nanoclaw-01-2"); track it
-// so we can tell which direct messages are addressed to us.
-let assigned = NAME;
-let backoff = 1000;
+OLLA_URL="${OILSAND_OLLA_ANTHROPIC_URL:-${ANTHROPIC_BASE_URL:-}}"
+TOKEN="${OILSAND_OLLA_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-olla}}"
+MODEL="${OILSAND_OLLA_MODEL:-${NANOCLAW_MODEL:-}}"
 
-function log(msg) {
-  console.log('[hub-bridge] ' + new Date().toISOString() + ' ' + msg);
+if [ -z "$OLLA_URL" ]; then
+  log "no Olla Anthropic URL set (OILSAND_OLLA_ANTHROPIC_URL); skipping"
+  exit 0
+fi
+
+# Strip a trailing /v1 if a caller accidentally passed the OpenAI shape —
+# the Anthropic SDK appends /v1/messages itself. Also rewrite older TUI
+# deploys that pointed ANTHROPIC_BASE_URL at /olla/openai by mistake.
+OLLA_URL="${OLLA_URL%/}"
+OLLA_URL="${OLLA_URL%/v1}"
+case "$OLLA_URL" in
+  */olla/openai*)
+    OLLA_URL="$(printf '%s' "$OLLA_URL" | sed -E 's|/olla/openai(/v1)?|/olla/anthropic|')"
+    log "rewrote OpenAI-shaped URL to Anthropic: $OLLA_URL"
+    ;;
+esac
+
+HOST="$(printf '%s' "$OLLA_URL" | sed -E 's|^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:]+).*|\1|')"
+if [ -z "$HOST" ] || [ "$HOST" = "$OLLA_URL" ]; then
+  log "ERROR: could not parse hostname from $OLLA_URL"
+  exit 1
+fi
+log "target Olla Anthropic API: $OLLA_URL (host=$HOST)"
+
+upsert_env() {
+  local key="$1" val="$2" file="$ENV_FILE"
+  touch "$file"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    grep -v "^${key}=" "$file" > "${file}.tmp" || true
+    mv "${file}.tmp" "$file"
+  fi
+  printf '%s=%s\n' "$key" "$val" >> "$file"
 }
 
-function statusText() {
-  return assigned + ' is online (NanoClaw container on host ' + os.hostname() +
-    '). This is a presence bridge: for agent administration use ncl inside ' +
-    'the container (TUI: Agents > Nanoclaw > connect).';
+upsert_env ANTHROPIC_BASE_URL "$OLLA_URL"
+# Token stays out of .env for the OneCLI path (vault holds it). MODEL is
+# informational for post-start ncl wiring.
+if [ -n "$MODEL" ]; then
+  upsert_env OILSAND_OLLA_MODEL "$MODEL"
+fi
+
+# --- OneCLI install (gateway compose + CLI; both required) -----------------
+export PATH="/usr/local/bin:/root/.local/bin:$HOME/.local/bin:$PATH"
+if [ ! -f "$HOME/.onecli/docker-compose.yml" ] && [ ! -f /root/.onecli/docker-compose.yml ]; then
+  log "installing OneCLI gateway…"
+  if ! curl -fsSL https://onecli.sh/install | sh; then
+    log "ERROR: OneCLI gateway install failed"
+    exit 1
+  fi
+fi
+if ! command -v onecli >/dev/null 2>&1; then
+  log "installing OneCLI CLI…"
+  if ! curl -fsSL https://onecli.sh/cli/install | sh; then
+    log "ERROR: OneCLI CLI install failed"
+    exit 1
+  fi
+  export PATH="/usr/local/bin:/root/.local/bin:$HOME/.local/bin:$PATH"
+fi
+if ! command -v onecli >/dev/null 2>&1; then
+  log "ERROR: onecli not on PATH after install"
+  exit 1
+fi
+
+# Resolve the dashboard URL. Prefer an already-configured api-host, else the
+# local default the installer binds.
+ONECLI_URL="$(onecli config get api-host 2>/dev/null | tr -d '\r' || true)"
+if printf '%s' "$ONECLI_URL" | grep -q 'https\?://'; then
+  :
+else
+  ONECLI_URL="$(printf '%s' "$ONECLI_URL" | grep -oE 'https?://[^[:space:]"]+' | head -n1 || true)"
+fi
+if [ -z "$ONECLI_URL" ]; then
+  ONECLI_URL="http://127.0.0.1:10254"
+  onecli config set api-host "$ONECLI_URL" >/dev/null 2>&1 || true
+fi
+log "OneCLI URL: $ONECLI_URL"
+
+# Bring the compose stack up if the installer left it stopped (common after
+# outer-container recreate when only the inner docker volumes persist).
+COMPOSE=""
+for cand in "$HOME/.onecli/docker-compose.yml" /root/.onecli/docker-compose.yml; do
+  if [ -f "$cand" ]; then COMPOSE="$cand"; break; fi
+done
+if [ -n "$COMPOSE" ]; then
+  docker compose -f "$COMPOSE" up -d >/dev/null 2>&1 || true
+fi
+
+# Wait for the vault to answer (compose bring-up can take a minute).
+ok=0
+for _ in $(seq 1 90); do
+  if curl -fsS "$ONECLI_URL/health" >/dev/null 2>&1 \
+     || curl -fsS "$ONECLI_URL/api/health" >/dev/null 2>&1 \
+     || curl -fsS "$ONECLI_URL/v1/health" >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ok" -ne 1 ]; then
+  log "ERROR: OneCLI did not become healthy at $ONECLI_URL"
+  if [ -n "$COMPOSE" ]; then
+    docker compose -f "$COMPOSE" ps >&2 || true
+  fi
+  exit 1
+fi
+log "OneCLI is healthy"
+
+upsert_env ONECLI_URL "$ONECLI_URL"
+
+# NanoClaw's container-runner refuses to spawn agents unless applyContainerConfig
+# succeeds, which needs ONECLI_API_KEY in .env. Prefer a previously persisted
+# key; otherwise ask the local CLI / bootstrap from gateway logs.
+API_KEY=""
+if grep -q '^ONECLI_API_KEY=' "$ENV_FILE" 2>/dev/null; then
+  API_KEY="$(grep '^ONECLI_API_KEY=' "$ENV_FILE" | head -n1 | cut -d= -f2-)"
+fi
+if [ -z "$API_KEY" ]; then
+  API_KEY="$(onecli auth api-key 2>/dev/null | tr -d '\r' | grep -oE 'oc_[A-Za-z0-9_]+' | head -n1 || true)"
+fi
+if [ -z "$API_KEY" ]; then
+  # Fresh local installs often print the bootstrap key once in container logs.
+  for c in $(docker ps --format '{{.Names}}' 2>/dev/null | grep -i onecli || true); do
+    API_KEY="$(docker logs "$c" 2>&1 | grep -oE 'oc_[A-Za-z0-9_]+' | head -n1 || true)"
+    [ -n "$API_KEY" ] && break
+  done
+fi
+if [ -n "$API_KEY" ]; then
+  upsert_env ONECLI_API_KEY "$API_KEY"
+  onecli auth login --api-key "$API_KEY" >/dev/null 2>&1 || true
+  log "ONECLI_API_KEY present in .env"
+else
+  log "WARNING: could not discover ONECLI_API_KEY — agent spawns may refuse until one is set"
+fi
+
+# Register the Olla host as a generic Bearer secret (same shape as NanoClaw
+# setup's custom-endpoint auth). Idempotent: delete+recreate on conflict.
+log "registering OneCLI secret for host $HOST…"
+onecli secrets delete --name OilsandOlla >/dev/null 2>&1 || true
+if ! onecli secrets create \
+    --name OilsandOlla \
+    --type generic \
+    --value "$TOKEN" \
+    --host-pattern "$HOST" \
+    --header-name Authorization \
+    --value-format 'Bearer {value}'; then
+  log "ERROR: onecli secrets create failed"
+  exit 1
+fi
+log "OneCLI secret OilsandOlla → host-pattern $HOST"
+
+# Best-effort: grant the secret to every existing agent so a recreated
+# Nanoclaw that already has groups can call Olla immediately. Also loop in
+# the background for agents NanoClaw creates after ensureAgent on first spawn.
+grant_olla_secret() {
+  SECRET_ID="$(onecli secrets list 2>/dev/null | grep -i OilsandOlla | head -n1 | awk '{print $1}' || true)"
+  [ -n "$SECRET_ID" ] || return 0
+  onecli agents list 2>/dev/null | while read -r line; do
+    aid="$(printf '%s' "$line" | awk '{print $1}')"
+    [ -n "$aid" ] || continue
+    printf '%s' "$aid" | grep -qE '^[a-zA-Z0-9-]+$' || continue
+    onecli agents set-secrets --id "$aid" --secret-ids "$SECRET_ID" >/dev/null 2>&1 || true
+  done
 }
+grant_olla_secret || true
+(
+  for _ in $(seq 1 30); do
+    sleep 10
+    grant_olla_secret || true
+  done
+) >> /var/log/oilsand-olla.log 2>&1 &
 
-function connect() {
-  const sock = net.createConnection({ host: HOST, port: PORT });
-  let buf = '';
-  let ping = null;
-  let settled = false;
+# Optional: once ncl.sock is up, pin the default group model to the pool model.
+if [ -n "$MODEL" ]; then
+  (
+    for _ in $(seq 1 60); do
+      [ -S /opt/nanoclaw/data/ncl.sock ] && break
+      sleep 2
+    done
+    if [ -S /opt/nanoclaw/data/ncl.sock ]; then
+      gid="$(ncl groups list --json 2>/dev/null | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"/\1/' || true)"
+      if [ -n "$gid" ]; then
+        ncl groups config update --id "$gid" --model "$MODEL" >/dev/null 2>&1 \
+          && log "set group $gid model=$MODEL" \
+          || log "could not set group model (non-fatal)"
+      fi
+    fi
+  ) >> /var/log/oilsand-olla.log 2>&1 &
+fi
 
-  const teardown = function () {
-    if (settled) { return; }
-    settled = true;
-    if (ping) { clearInterval(ping); ping = null; }
-    log('disconnected; retrying in ' + backoff + 'ms');
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, BACKOFF_MAX);
-  };
+log "Olla wiring complete — .env has ANTHROPIC_BASE_URL + ONECLI_URL (+ API key if discovered)"
+OLLA_CFG_EOF
+RUN chmod +x /usr/local/bin/oilsand-configure-olla.sh
+# Join the Oilsand Buzz relay (block/buzz) as this instance. Presence only —
+# keeps a Nostr key on the state volume, sets online, joins the channel.
+# Backgrounded and non-fatal so an unreachable relay never stops NanoClaw.
+COPY <<'BUZZ_JOIN_EOF' /usr/local/bin/oilsand-join-buzz.sh
+#!/bin/bash
+set -euo pipefail
+log() { printf '[oilsand-buzz] %s\n' "$*"; }
 
-  sock.on('connect', function () {
-    backoff = 1000;
-    log('connected to ' + HOST + ':' + PORT + ' as ' + NAME);
-    sock.write(JSON.stringify({ type: 'hello', name: NAME, kind: 'agent' }) + '\n');
-    ping = setInterval(function () {
-      sock.write(JSON.stringify({ type: 'ping' }) + '\n');
-    }, PING_MS);
-  });
+RELAY="${OILSAND_BUZZ_RELAY_URL:-}"
+CHAN_ID="${OILSAND_BUZZ_CHANNEL_ID:-}"
+CHAN_NAME="${OILSAND_BUZZ_CHANNEL:-oilsand}"
+NAME="${OILSAND_BUZZ_NAME:-nanoclaw}"
 
-  sock.on('data', function (chunk) {
-    buf += chunk.toString('utf8');
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i);
-      buf = buf.slice(i + 1);
-      if (!line.trim()) { continue; }
-      let f;
-      try { f = JSON.parse(line); } catch (e) { continue; }
-      if (f.type === 'welcome') {
-        assigned = f.name || NAME;
-        log('joined channel as ' + assigned);
-      } else if (f.type === 'msg' && f.to === assigned && f.from && f.from !== assigned) {
-        sock.write(JSON.stringify({ type: 'msg', to: f.from, text: statusText() }) + '\n');
-      }
-    }
-  });
+if [ -z "$RELAY" ]; then
+  log "no OILSAND_BUZZ_RELAY_URL; skipping"
+  exit 0
+fi
+if ! command -v buzz >/dev/null 2>&1; then
+  log "buzz-cli not on PATH; skipping (rebuild image from multi-stage buzz copy)"
+  exit 0
+fi
 
-  sock.on('error', function (err) { log('socket error: ' + err.message); });
-  sock.on('close', teardown);
-}
+mkdir -p /opt/nanoclaw/store
+KEY_FILE="/opt/nanoclaw/store/oilsand-buzz.key"
+if [ ! -s "$KEY_FILE" ]; then
+  openssl rand -hex 32 > "$KEY_FILE"
+  chmod 600 "$KEY_FILE"
+  log "generated per-instance Buzz key at $KEY_FILE"
+fi
+export BUZZ_RELAY_URL="$RELAY"
+export BUZZ_PRIVATE_KEY="$(tr -d '\r\n' < "$KEY_FILE")"
+export PATH="/usr/local/bin:$PATH"
 
-connect();
-HUBBRIDGE_EOF
-# Entrypoint: bring up the inner dockerd, start the hub bridge, then hand off
-# to CMD. The cgroup shuffle mirrors the official docker:dind entrypoint —
-# on cgroup v2 dockerd can only enable controllers for child cgroups once the
-# root cgroup's processes have moved into a leaf.
+log "relay=$RELAY name=$NAME channel=${CHAN_ID:-$CHAN_NAME}"
+
+# Wait for the relay (gateway may still be starting).
+ok=0
+for _ in $(seq 1 30); do
+  if curl -fsS "${RELAY%/}/_liveness" >/dev/null 2>&1 \
+     || curl -fsS "${RELAY%/}/health" >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$ok" -ne 1 ]; then
+  log "WARNING: relay not reachable at $RELAY — will keep retrying presence"
+fi
+
+# Resolve channel id by name when deploy did not pin one.
+if [ -z "$CHAN_ID" ]; then
+  LIST="$(buzz channels list 2>/dev/null || true)"
+  CHAN_ID="$(printf '%s' "$LIST" | grep -i "\"name\"[[:space:]]*:[[:space:]]*\"$CHAN_NAME\"" -B5 -A5 \
+    | grep -oE '[0-9a-f-]{36}' | head -n1 || true)"
+  if [ -z "$CHAN_ID" ]; then
+    OUT="$(buzz channels create --name "$CHAN_NAME" --type stream --visibility open 2>/dev/null || true)"
+    CHAN_ID="$(printf '%s' "$OUT" | grep -oE '[0-9a-f-]{36}' | head -n1 || true)"
+  fi
+fi
+if [ -n "$CHAN_ID" ]; then
+  buzz channels join --channel "$CHAN_ID" >/dev/null 2>&1 || true
+  printf '%s\n' "$CHAN_ID" > /opt/nanoclaw/store/oilsand-buzz-channel.id
+  log "joined channel $CHAN_ID"
+else
+  log "WARNING: could not resolve Buzz channel $CHAN_NAME"
+fi
+
+# Keep presence alive; exit quietly on permanent CLI failure after backoff.
+backoff=5
+while true; do
+  buzz users set-presence --status online >/dev/null 2>&1 \
+    && log "presence online as $NAME" \
+    || log "set-presence failed (retry in ${backoff}s)"
+  sleep 60
+  backoff=5
+done
+BUZZ_JOIN_EOF
+RUN chmod +x /usr/local/bin/oilsand-join-buzz.sh
+# Entrypoint: bring up the inner dockerd, wire Olla via OneCLI, join Buzz,
+# then hand off to CMD. The cgroup shuffle mirrors the official docker:dind
+# entrypoint — on cgroup v2 dockerd can only enable controllers for child
+# cgroups once the root cgroup's processes have moved into a leaf.
 COPY <<'ENTRYPOINT_EOF' /usr/local/bin/nanoclaw-entrypoint.sh
 #!/bin/sh
 set -e
@@ -175,11 +411,19 @@ until docker info >/dev/null 2>&1; do
   fi
   sleep 1
 done
-# Join the Agent Hub, if one was configured at deploy time. Backgrounded and
-# non-fatal: an unreachable hub must never stop NanoClaw from starting.
-if [ -n "${OILSAND_HUB_HOST:-}" ]; then
-  echo "[entrypoint] joining Agent Hub at ${OILSAND_HUB_HOST}:${OILSAND_HUB_PORT:-40117} as ${OILSAND_HUB_NAME:-nanoclaw}"
-  node /usr/local/bin/oilsand-hub-bridge.cjs >> /var/log/oilsand-hub-bridge.log 2>&1 &
+# OneCLI + .env → Olla. Failure is loud but non-fatal for the outer process:
+# NanoClaw still starts (Buzz/shell work), and agent spawns will surface the
+# OneCLI error clearly in logs if wiring did not complete.
+if [ -n "${OILSAND_OLLA_ANTHROPIC_URL:-${ANTHROPIC_BASE_URL:-}}" ]; then
+  echo "[entrypoint] configuring OneCLI → Olla…"
+  /usr/local/bin/oilsand-configure-olla.sh >> /var/log/oilsand-olla.log 2>&1 \
+    || echo "[entrypoint] WARNING: oilsand-configure-olla.sh failed — see /var/log/oilsand-olla.log" >&2
+fi
+# Join Buzz (block/buzz) when the TUI deployed coordinates. Backgrounded and
+# non-fatal: an unreachable relay must never stop NanoClaw from starting.
+if [ -n "${OILSAND_BUZZ_RELAY_URL:-}" ]; then
+  echo "[entrypoint] joining Buzz at ${OILSAND_BUZZ_RELAY_URL} as ${OILSAND_BUZZ_NAME:-nanoclaw}"
+  /usr/local/bin/oilsand-join-buzz.sh >> /var/log/oilsand-buzz.log 2>&1 &
 fi
 exec "$@"
 ENTRYPOINT_EOF
@@ -217,17 +461,22 @@ echo "[deploy] docker: $(sudo docker --version)"
 // nanoclawDeployScript builds the install/run bootstrap for `instances`
 // Nanoclaw containers on one worker: Docker bootstrap, a one-time image build,
 // then a run loop that picks the next free nanoclaw-NN name so repeated deploys
-// keep adding instances instead of colliding. Each container receives the Agent
-// Hub coordinates (OILSAND_HUB_HOST/PORT/NAME), which the bridge baked into the
-// image reads on startup to join the shared channel on the gateway (hub.go).
+// keep adding instances instead of colliding. Each container receives Olla
+// Anthropic coordinates (OneCLI) and Buzz relay env so the baked-in join script
+// can appear on the TUI's Buzz channel.
 func (m *model) nanoclawDeployScript(instances int) string {
 	if instances < 1 {
 		instances = 1
 	}
-	base := strings.TrimRight(m.gateway, "/") + "/olla/openai/v1"
+	// Claude Agent SDK (NanoClaw's default provider) speaks Anthropic Messages
+	// API. Olla exposes that at /olla/anthropic (SDK appends /v1/messages).
+	gw := strings.TrimRight(m.gateway, "/")
+	anthropicBase := gw + "/olla/anthropic"
+	openaiBase := gw + "/olla/openai/v1"
 	key := orDefault(m.token, "olla")
 	model := m.effDefaultModel()
-	hubHost := hostFromURL(m.gateway)
+	buzzRelay := m.buzzRelayHTTP()
+	buzzChan := m.buzzChannelID
 	dfB64 := base64.StdEncoding.EncodeToString([]byte(nanoclawDockerfile))
 
 	var b strings.Builder
@@ -260,21 +509,32 @@ for _i in $(seq 1 %d); do
   sudo docker run -d --restart unless-stopped --privileged --name "$NAME" \
     -v "oilsand-$NAME:/opt/nanoclaw/store" \
     -v "oilsand-$NAME-docker:/var/lib/docker" \
-    -e OPENAI_BASE_URL='%s' \
-    -e OPENAI_API_KEY='%s' \
+    -e OILSAND_OLLA_ANTHROPIC_URL='%s' \
+    -e OILSAND_OLLA_TOKEN='%s' \
+    -e OILSAND_OLLA_MODEL='%s' \
     -e ANTHROPIC_BASE_URL='%s' \
     -e ANTHROPIC_AUTH_TOKEN='%s' \
+    -e OPENAI_BASE_URL='%s' \
+    -e OPENAI_API_KEY='%s' \
     -e NANOCLAW_MODEL='%s' \
-    -e OILSAND_HUB_HOST='%s' \
-    -e OILSAND_HUB_PORT='%s' \
-    -e OILSAND_HUB_NAME="$NAME" \
+    -e OILSAND_BUZZ_RELAY_URL='%s' \
+    -e OILSAND_BUZZ_CHANNEL_ID='%s' \
+    -e OILSAND_BUZZ_CHANNEL='%s' \
+    -e OILSAND_BUZZ_NAME="$NAME" \
     "$NANO_IMG" >/dev/null
   started="$started $NAME"
 done
 echo "[deploy] nanoclaw instances on this worker:"
 sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 echo "[deploy] started:$started — each instance is isolated in its own container (state volume oilsand-<name>)."
-`, instances, shSingle(base), shSingle(key), shSingle(base), shSingle(key), shSingle(model), shSingle(hubHost), hubPort))
+echo "[deploy] OneCLI will be wired to Olla Anthropic API at %s on first boot (see /var/log/oilsand-olla.log)."
+echo "[deploy] Buzz join uses %s (see /var/log/oilsand-buzz.log); deploy Buzz from the TUI (ctrl+d) if empty."
+`, instances,
+		shSingle(anthropicBase), shSingle(key), shSingle(model),
+		shSingle(anthropicBase), shSingle(key),
+		shSingle(openaiBase), shSingle(key), shSingle(model),
+		shSingle(buzzRelay), shSingle(buzzChan), buzzChannelName,
+		anthropicBase, orDefault(buzzRelay, "(no gateway)")))
 	return b.String()
 }
 
@@ -290,7 +550,8 @@ echo "  ncl help              every resource and verb"
 echo "  ncl groups list       agent groups"
 echo "  ncl sessions list     active sessions"
 echo "  ncl tasks list        scheduled tasks"
-echo "Logs: docker logs (outside) or /var/log/oilsand-hub-bridge.log (hub bridge)."
+echo "Logs: docker logs (outside), /var/log/oilsand-buzz.log (Buzz),"
+echo "      /var/log/oilsand-olla.log (OneCLI → Olla wiring)."
 echo "exit or ctrl-d returns to the TUI."
 `
 

@@ -26,7 +26,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			connectedMsg, localOllaFoundMsg, statusMsg, modelsMsg, vmsMsg,
 			chatEvMsg, pullEvMsg, procEvMsg, nextNameMsg,
 			sshResultMsg, endpointsMsg, notifyMsg, tea.WindowSizeMsg,
-			hubDialedMsg, hubEvMsg, hubDeployedMsg, nanoclawInstancesMsg,
+			buzzDeployedMsg, buzzPollMsg, buzzPollTickMsg, nanoclawInstancesMsg,
 			agentRemovedMsg:
 			// handled normally below
 		default:
@@ -238,39 +238,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = msg.agent + " registered on " + msg.host
 		return m, nil
 
-	case hubDialedMsg:
-		if msg.gen != m.hubGen {
-			// A reconnect superseded this dial while it was in flight.
-			if msg.conn != nil {
-				msg.conn.Close()
-			}
-			return m, nil
-		}
-		m.hubBusy = false
-		if msg.err != nil {
-			m.notice = "hub connect failed: " + msg.err.Error() + " — ctrl+d deploys the hub on the gateway"
-			m.hubFeed = append(m.hubFeed, hubLine{sys: true, text: "connect failed: " + msg.err.Error()})
-			m.renderHub()
-			return m, nil
-		}
-		m.hubConn = msg.conn
-		m.hubCh = msg.ch
-		return m, waitHub(m.hubCh, m.hubGen)
+	case buzzDeployedMsg:
+		return m.handleBuzzDeployed(msg)
 
-	case hubEvMsg:
-		if msg.gen != m.hubGen {
-			return m, nil // event from a stale connection
-		}
-		return m.handleHubEvent(msg.ev)
+	case buzzPollMsg:
+		return m.handleBuzzPoll(msg)
 
-	case hubDeployedMsg:
-		m.hubBusy = false
-		if msg.err != nil {
-			m.notice = "hub deploy failed: " + msg.err.Error()
+	case buzzPollTickMsg:
+		if msg.gen != m.hubGen || m.section != secBuzz {
 			return m, nil
 		}
-		m.notice = "agent hub deployed on the gateway — connecting…"
-		return m, m.connectHub()
+		return m, m.pollBuzzCmd(m.hubGen)
 
 	case nanoclawInstancesMsg:
 		m.nanoInstBusy = false
@@ -424,7 +402,7 @@ func (m *model) applyLayout(w, h int) {
 	m.logVP.Width = m.contentW
 	m.logVP.Height = maxInt(m.contentH-3-vmsH-2, 3)
 
-	// Hub: header + peers + hint + 2-line input around the feed viewport.
+	// Buzz: header + peers + hint + 2-line input around the feed viewport.
 	m.hubTA.SetWidth(m.contentW)
 	m.hubVP.Width = m.contentW
 	m.hubVP.Height = maxInt(m.contentH-7, 3)
@@ -434,7 +412,7 @@ func (m *model) applyLayout(w, h int) {
 	m.glam = newGlamour(m.contentW)
 	m.renderChat()
 	m.renderLog()
-	m.renderHub()
+	m.renderBuzz()
 }
 
 // ---- key handling ----------------------------------------------------------
@@ -473,7 +451,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) isTyping() bool {
-	if m.zone == zoneContent && (m.section == secChat || m.section == secHub) {
+	if m.zone == zoneContent && (m.section == secChat || m.section == secBuzz) {
 		return true
 	}
 	if l := m.activeList(); l != nil && l.FilterState() == list.Filtering {
@@ -507,11 +485,9 @@ func (m *model) enterContent() tea.Cmd {
 		m.hubTA.Blur()
 		return m.composer.Focus()
 	}
-	if m.section == secHub {
+	if m.section == secBuzz {
 		m.composer.Blur()
-		// Dial the hub lazily on first entry so the channel is live by the
-		// time the user starts typing.
-		return tea.Batch(m.hubTA.Focus(), m.hubAutoConnect())
+		return tea.Batch(m.hubTA.Focus(), m.buzzAutoConnect())
 	}
 	m.composer.Blur()
 	m.hubTA.Blur()
@@ -723,17 +699,17 @@ func (m model) handleContentKey(msg tea.KeyMsg, k string) (tea.Model, tea.Cmd) {
 		m.agentsList = nl
 		return m, cmd
 
-	case secHub:
+	case secBuzz:
 		switch k {
 		case "esc":
 			m.leaveContent()
 			return m, nil
 		case "enter":
-			return m, m.sendHub()
+			return m, m.sendBuzz()
 		case "ctrl+r":
-			return m, m.connectHub()
+			return m, m.connectBuzz()
 		case "ctrl+d":
-			return m, m.deployHub()
+			return m, m.deployBuzz()
 		default:
 			var cmd tea.Cmd
 			m.hubTA, cmd = m.hubTA.Update(msg)

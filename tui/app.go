@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -30,7 +29,7 @@ const (
 	secModels
 	secChat
 	secAgents
-	secHub
+	secBuzz
 	secLoad
 	secNutanix
 	secAccess
@@ -48,7 +47,7 @@ var sections = []sectionInfo{
 	{"Models", "models in the pool"},
 	{"Chat", "test the pool"},
 	{"Agents", "CLI agents via ssh"},
-	{"Hub", "agent chat channel"},
+	{"Buzz", "Buzz relay & agent chat"},
 	{"Load", "load balancing"},
 	{"Nutanix", "VMs & deploy"},
 	{"Access", "base URL & token"},
@@ -189,18 +188,18 @@ type model struct {
 	nanoInstBusy bool
 	nanoInstAt   time.Time
 
-	// agent hub (Hub tab): live connection to the shared agent chat channel
-	// on the gateway host. hubGen guards against events from stale dials.
-	hubConn  net.Conn
-	hubCh    chan hubEvent
-	hubGen   int
-	hubOn    bool
-	hubBusy  bool
-	hubName  string
-	hubPeers []string
-	hubFeed  []hubLine
-	hubVP    viewport.Model
-	hubTA    textarea.Model
+	// Buzz tab: deploy/poll the block/buzz relay on the gateway. hubGen
+	// guards against stale poll ticks; buzzOpKey/channel come from deploy.
+	hubGen        int
+	hubOn         bool
+	hubBusy       bool
+	hubName       string
+	hubPeers      []string
+	hubFeed       []buzzLine
+	hubVP         viewport.Model
+	hubTA         textarea.Model
+	buzzOpKey     string
+	buzzChannelID string
 
 	chatVP   viewport.Model
 	logVP    viewport.Model
@@ -428,6 +427,8 @@ func newModel(gateway, sshUser, sshPass string) model {
 		agentReg:      st.Agents,
 		agentHosts:    st.AgentHosts,
 		hermesCfg:     st.Hermes,
+		buzzOpKey:     st.Buzz.OperatorKey,
+		buzzChannelID: st.Buzz.ChannelID,
 		customDeploys: customDeploys,
 		vmImages:      vmImages,
 		imageByID:     map[string]string{},

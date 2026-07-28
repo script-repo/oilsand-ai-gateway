@@ -6,22 +6,24 @@ import (
 	"testing"
 )
 
-// The image must carry the hub bridge: upstream NanoClaw does not speak the
-// Oilsand hub protocol, so without a process of ours inside the container no
-// instance ever appears on the channel, however the env is set.
-func TestNanoclawImageShipsHubBridge(t *testing.T) {
+// The image must carry buzz-cli and a join script: upstream NanoClaw does not
+// speak Buzz, so without a process of ours inside the container no instance
+// ever appears on the channel, however the env is set.
+func TestNanoclawImageShipsBuzzJoin(t *testing.T) {
 	for _, want := range []string{
-		"/usr/local/bin/oilsand-hub-bridge.cjs", // bridge is baked into the image
-		"OILSAND_HUB_HOST",                      // entrypoint reads the hub coordinates
-		"type: 'hello'",                         // and speaks the hub's join frame
+		"/usr/local/bin/oilsand-join-buzz.sh",
+		"OILSAND_BUZZ_RELAY_URL",
+		"FROM ghcr.io/block/buzz:main AS buzzcli",
+		"buzz users set-presence",
+		"buzz channels join",
 	} {
 		if !strings.Contains(nanoclawDockerfile, want) {
 			t.Errorf("Dockerfile missing %q", want)
 		}
 	}
-	// The bridge must not block NanoClaw itself from starting.
-	if !strings.Contains(nanoclawDockerfile, "oilsand-hub-bridge.cjs >> /var/log/oilsand-hub-bridge.log 2>&1 &") {
-		t.Error("hub bridge is not started in the background")
+	// Join must not block NanoClaw itself from starting.
+	if !strings.Contains(nanoclawDockerfile, "oilsand-join-buzz.sh >> /var/log/oilsand-buzz.log 2>&1 &") {
+		t.Error("Buzz join is not started in the background")
 	}
 	// ncl has to be on PATH for the interactive shell to be useful.
 	if !strings.Contains(nanoclawDockerfile, "ln -sf /opt/nanoclaw/bin/ncl /usr/local/bin/ncl") {
@@ -44,21 +46,71 @@ func TestNanoclawEmbeddedScriptsAvoidBackticks(t *testing.T) {
 	}
 }
 
-// Deployed containers need the hub coordinates, and the per-instance name has
-// to be the container name so the Hub tab lists something recognizable.
-func TestNanoclawDeployScriptPassesHubEnv(t *testing.T) {
+// The image must install OneCLI, write .env, and register an Olla-facing
+// secret — trunk NanoClaw refuses agent spawns unless applyContainerConfig
+// succeeds, and the Claude provider only redirects when ANTHROPIC_BASE_URL
+// is in .env (not merely a Docker -e).
+func TestNanoclawImageShipsOllaWiring(t *testing.T) {
+	for _, want := range []string{
+		"/usr/local/bin/oilsand-configure-olla.sh",
+		"src/providers/oilsand-olla.ts",
+		"OILSAND_OLLA_ANTHROPIC_URL",
+		"onecli secrets create",
+		"OilsandOlla",
+		"ANTHROPIC_BASE_URL",
+		"ONECLI_API_KEY",
+		"/olla/anthropic", // migration rewrite target for older deploys
+	} {
+		if !strings.Contains(nanoclawDockerfile, want) {
+			t.Errorf("Dockerfile missing Olla/OneCLI wiring %q", want)
+		}
+	}
+	if !strings.Contains(nanoclawDockerfile, "oilsand-configure-olla.sh >> /var/log/oilsand-olla.log") {
+		t.Error("entrypoint does not run oilsand-configure-olla.sh")
+	}
+}
+
+// Deployed containers need Buzz coordinates, and the per-instance name has to
+// be the container name so the Buzz tab can attribute presence.
+func TestNanoclawDeployScriptPassesBuzzEnv(t *testing.T) {
 	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+	m.buzzChannelID = "chan-uuid-1"
 
 	script := m.nanoclawDeployScript(2)
 	for _, want := range []string{
-		"-e OILSAND_HUB_HOST='10.0.0.1'",
-		"-e OILSAND_HUB_PORT='" + hubPort + "'",
-		`-e OILSAND_HUB_NAME="$NAME"`,
+		"-e OILSAND_BUZZ_RELAY_URL='http://10.0.0.1:3000'",
+		"-e OILSAND_BUZZ_CHANNEL_ID='chan-uuid-1'",
+		"-e OILSAND_BUZZ_CHANNEL='" + buzzChannelName + "'",
+		`-e OILSAND_BUZZ_NAME="$NAME"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("deploy script missing %q", want)
 		}
+	}
+}
+
+// Agents speak Anthropic Messages API; the OpenAI-shaped URL must not be used
+// as ANTHROPIC_BASE_URL (the SDK would call …/openai/v1/v1/messages).
+func TestNanoclawDeployScriptPointsAtAnthropicOlla(t *testing.T) {
+	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
+	m.token = "test-token"
+	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
+
+	script := m.nanoclawDeployScript(1)
+	for _, want := range []string{
+		"-e OILSAND_OLLA_ANTHROPIC_URL='http://10.0.0.1:40114/olla/anthropic'",
+		"-e ANTHROPIC_BASE_URL='http://10.0.0.1:40114/olla/anthropic'",
+		"-e OILSAND_OLLA_TOKEN='test-token'",
+		"-e OPENAI_BASE_URL='http://10.0.0.1:40114/olla/openai/v1'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("deploy script missing %q", want)
+		}
+	}
+	// Guard the old mistake: Anthropic env must not point at the OpenAI path.
+	if strings.Contains(script, "ANTHROPIC_BASE_URL='http://10.0.0.1:40114/olla/openai") {
+		t.Error("ANTHROPIC_BASE_URL incorrectly points at /olla/openai")
 	}
 }
 

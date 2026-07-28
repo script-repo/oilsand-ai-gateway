@@ -25,24 +25,39 @@ type agentDef struct {
 }
 
 // depsBootstrap installs the prerequisites the npm/Node agents need on
-// Rocky/RHEL and makes `npm -g` usable as a non-root user:
+// Rocky/RHEL and Ubuntu/Debian and makes `npm -g` usable as a non-root user:
 //   - git (Hermes/OpenClaw installers require it)
 //   - Node.js 22 via NodeSource (these are Node tools)
 //   - a user-writable npm global prefix (~/.npm-global), because NodeSource sets
 //     the prefix to /usr, which makes `npm install -g openclaw` fail with EACCES
-//     for a normal user. We also persist the bin dir on PATH for future shells.
-const depsBootstrap = `echo "[deploy] ensuring git…"
-command -v git >/dev/null 2>&1 || sudo dnf install -y git
+//     for a normal user. We also persist the bin dir (and ~/.local/bin) on PATH.
+const depsBootstrap = `echo "[deploy] ensuring git + Node.js…"
+. /etc/os-release 2>/dev/null || true
+if ! command -v git >/dev/null 2>&1; then
+  case "${ID:-}" in
+    ubuntu|debian) sudo apt-get update -y >/dev/null 2>&1 || true; sudo apt-get install -y git ;;
+    *) sudo dnf install -y git 2>/dev/null || sudo yum install -y git ;;
+  esac
+fi
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   echo "[deploy] installing Node.js 22 + npm via NodeSource (sudo)…"
-  curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
-  sudo dnf install -y nodejs
+  case "${ID:-}" in
+    ubuntu|debian)
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+      sudo apt-get install -y nodejs
+      ;;
+    *)
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
+      sudo dnf install -y nodejs 2>/dev/null || sudo yum install -y nodejs
+      ;;
+  esac
 fi
 NPM_PREFIX="$HOME/.npm-global"
-mkdir -p "$NPM_PREFIX/bin"
+mkdir -p "$NPM_PREFIX/bin" "$HOME/.local/bin"
 npm config set prefix "$NPM_PREFIX" >/dev/null 2>&1 || true
-case ":$PATH:" in *":$NPM_PREFIX/bin:"*) ;; *) export PATH="$NPM_PREFIX/bin:$PATH";; esac
+export PATH="$HOME/.local/bin:$NPM_PREFIX/bin:$PATH"
 grep -q '.npm-global/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> "$HOME/.bashrc"
+grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 `
 
 // crushDeployScript installs crush from the Charm yum repo on the Olla server
@@ -112,12 +127,35 @@ var agentCatalog = []agentDef{
 	},
 }
 
+// hermesInstallFragment installs Hermes via the official Nous installer when
+// missing, with ollama launch as a best-effort secondary. Fails closed if
+// hermes is still not on PATH afterward (avoids exit 127 from a later bare
+// `hermes` invocation). Expects depsBootstrap to have put ~/.local/bin on PATH.
+const hermesInstallFragment = `export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "[deploy] installing hermes (official installer)…"
+  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+fi
+if ! command -v hermes >/dev/null 2>&1 && command -v ollama >/dev/null 2>&1; then
+  echo "[deploy] hermes still missing; trying ollama launch hermes…"
+  ollama launch hermes --yes --model __HERMES_MODEL__ </dev/null || true
+  export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+fi
+if ! command -v hermes >/dev/null 2>&1; then
+  echo "[deploy] ERROR: hermes not found on PATH after install (tried official installer + ollama launch)" >&2
+  echo "[deploy] ensure ~/.local/bin is on PATH and re-run, or install manually:" >&2
+  echo "[deploy]   curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash" >&2
+  exit 1
+fi
+echo "[deploy] hermes: $(command -v hermes)"
+`
+
 // agentDeployScript returns the install bootstrap for an agent. Crush uses the
-// Charm repo; worker agents bootstrap deps then do a headless ollama launch
-// (--yes --model is required for non-interactive installs). Hermes is then
-// repointed at the Olla OpenAI endpoint so it uses the whole pool, and - when a
-// Telegram token is configured - the messaging gateway is installed and started
-// fully unattended (so deploy needs near-zero interaction).
+// Charm repo; Hermes uses the official installer then Olla config (+ optional
+// Telegram gateway); OpenClaw bootstraps deps then ollama launch. Headless
+// Hermes deploy does NOT exec interactive `hermes` — that caused exit 127 when
+// the binary was missing and blocked agent registration on a clean exit.
 func (m *model) agentDeployScript(a agentDef) string {
 	if a.name == "Crush" {
 		return crushDeployScript
@@ -135,25 +173,29 @@ func (m *model) agentDeployScript(a agentDef) string {
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
-	if gateway {
-		// Make every hermes prompt_yes_no fall back to its default (yes).
+	if a.name == "Hermes" {
 		b.WriteString("export HERMES_NONINTERACTIVE=1\n")
+		b.WriteString(depsBootstrap)
+		b.WriteString(strings.ReplaceAll(hermesInstallFragment, "__HERMES_MODEL__", model))
+		b.WriteString(m.hermesOllaConfigScript(model))
+		if gateway {
+			b.WriteString(m.hermesGatewayScript())
+			b.WriteString("echo \"[deploy] Hermes gateway is ready (Telegram). You can close this window.\"\n")
+		} else {
+			b.WriteString("echo \"[deploy] Hermes installed and pointed at Olla. Open it from Agents (enter) to chat.\"\n")
+		}
+		return b.String()
 	}
 	b.WriteString(depsBootstrap)
 	b.WriteString(fmt.Sprintf("if ! command -v %s >/dev/null 2>&1; then\n", a.cli))
 	b.WriteString(fmt.Sprintf("  echo \"[deploy] installing %s (headless, model %s)…\"\n", a.cli, model))
-	b.WriteString(fmt.Sprintf("  ollama launch %s --yes --model %s </dev/null || true\n", a.cli, model))
+	b.WriteString(fmt.Sprintf("  ollama launch %s --yes --model %s </dev/null\n", a.cli, model))
 	b.WriteString("fi\n")
-	if a.name == "Hermes" {
-		b.WriteString(m.hermesOllaConfigScript(model))
-	}
-	if gateway {
-		b.WriteString(m.hermesGatewayScript())
-		b.WriteString("echo \"[deploy] Hermes gateway is ready (Telegram). You can close this window.\"\n")
-	} else {
-		b.WriteString(fmt.Sprintf("echo \"[deploy] launching %s…\"\n", a.cli))
-		b.WriteString(a.cli + "\n")
-	}
+	b.WriteString(fmt.Sprintf("if ! command -v %s >/dev/null 2>&1; then\n", a.cli))
+	b.WriteString(fmt.Sprintf("  echo \"[deploy] ERROR: %s not found on PATH after install\" >&2\n", a.cli))
+	b.WriteString("  exit 1\nfi\n")
+	b.WriteString(fmt.Sprintf("echo \"[deploy] launching %s…\"\n", a.cli))
+	b.WriteString(a.cli + "\n")
 	return b.String()
 }
 
@@ -203,7 +245,13 @@ echo ` + b64 + ` | base64 -d > /tmp/oilsand-hermes-env.py
 `)
 	b.WriteString(fmt.Sprintf("TG_TOKEN='%s' TG_ALLOWED='%s' TG_HOME='%s' \"$PY\" /tmp/oilsand-hermes-env.py\n",
 		shSingle(h.TelegramBotToken), shSingle(h.TelegramAllowedUsers), shSingle(h.TelegramHomeChannel)))
-	b.WriteString("HERMES_BIN=\"$(command -v hermes || echo \"$HOME/.local/bin/hermes\")\"\n")
+	b.WriteString(`export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+HERMES_BIN="$(command -v hermes)"
+if [ -z "$HERMES_BIN" ] || [ ! -x "$HERMES_BIN" ]; then
+  echo "[deploy] ERROR: hermes not executable for gateway install" >&2
+  exit 1
+fi
+`)
 	if h.gatewayMode() == "system" {
 		b.WriteString(`echo "[deploy] installing gateway (system service)…"
 sudo HERMES_NONINTERACTIVE=1 HOME="$HOME" "$HERMES_BIN" gateway install --system --run-as-user "$USER" </dev/null
@@ -294,11 +342,11 @@ rm -rf "$HOME/.hermes"
 echo "[remove] hermes removed"
 `
 	case "OmniRoute":
-		// Remove the service container; keep the omniroute-data volume so a later
-		// redeploy finds its providers/keys (like Crush keeps ~/.config/crush).
+		// Remove service containers; keep named volumes so a later redeploy
+		// finds providers/keys (like Crush keeps ~/.config/crush).
 		return `echo "[remove] stopping omniroute…"
-sudo docker rm -f omniroute >/dev/null 2>&1 || true
-echo "[remove] omniroute removed (config kept in the omniroute-data volume)"
+sudo docker rm -f omniroute omniroute-redis >/dev/null 2>&1 || true
+echo "[remove] omniroute removed (config kept in omniroute-data volume)"
 `
 	}
 	return ""

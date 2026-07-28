@@ -115,8 +115,8 @@ func (m model) sectionBody() string {
 		return m.viewChat()
 	case secAgents:
 		return m.viewAgents()
-	case secHub:
-		return m.viewHub()
+	case secBuzz:
+		return m.viewBuzz()
 	case secLoad:
 		return m.viewLoad()
 	case secNutanix:
@@ -561,7 +561,7 @@ func (m model) shortHelp() []key.Binding {
 		mid = []key.Binding{m.km.Pull, m.km.Browse, m.km.Remove, m.km.SetDef, m.km.SetModel, m.km.Filter, m.km.Back}
 	case secAgents:
 		mid = []key.Binding{m.km.AgentOpen, m.km.AgentDeploy, m.km.Remove, m.km.Instances, m.km.EditCfg, m.km.Filter, m.km.Back}
-	case secHub:
+	case secBuzz:
 		mid = []key.Binding{m.km.Send, m.km.HubConnect, m.km.HubDeploy, m.km.Back}
 	case secNutanix:
 		if m.nutanixCustom {
