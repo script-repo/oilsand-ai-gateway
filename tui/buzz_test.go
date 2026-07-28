@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ func TestBuzzDeployScript(t *testing.T) {
 		"ensuring git, openssl, curl", // bare gateway images lack these
 		"git clone",
 		"ERROR: git still missing",
+		"buzz_run", // host or docker fallback for channel create
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)
@@ -42,9 +44,8 @@ func TestBuzzSectionWiring(t *testing.T) {
 }
 
 func TestParseBuzzPoll(t *testing.T) {
-	out := "CHAN abc-def\nJSON_BEGIN\n" +
-		`[{"author_name":"nanoclaw-01","content":"hello","created_at":"2026-01-01T12:00:00Z"}]` +
-		"\nJSON_END\n"
+	payload := `[{"author_name":"nanoclaw-01","content":"hello","created_at":"2026-01-01T12:00:00Z"}]`
+	out := "CHAN abc-def\nRC 0\nB64 " + b64s(payload) + "\nERRB64 \n"
 	msg := parseBuzzPoll(1, out)
 	if msg.err != nil {
 		t.Fatalf("err=%v", msg.err)
@@ -58,7 +59,7 @@ func TestParseBuzzPoll(t *testing.T) {
 }
 
 func TestParseBuzzPollEmptyIsOK(t *testing.T) {
-	out := "CHAN uuid-here\nJSON_BEGIN\n[]\nJSON_END\n"
+	out := "CHAN uuid-here\nRC 0\nB64 " + b64s("[]") + "\nERRB64 \n"
 	msg := parseBuzzPoll(2, out)
 	if msg.err != nil {
 		t.Fatalf("empty feed should not error: %v", msg.err)
@@ -69,7 +70,7 @@ func TestParseBuzzPollEmptyIsOK(t *testing.T) {
 }
 
 func TestParseBuzzPollExtractsFromNoise(t *testing.T) {
-	// MOTD / banner before markers (or legacy poll without markers).
+	// Legacy poll without base64 framing.
 	out := "Welcome to Rocky\nCHAN ch1\n" + `[{"pubkey":"aabbccdd","content":"hi","created_at":1}]` + "\n"
 	msg := parseBuzzPoll(3, out)
 	if msg.err != nil {
@@ -81,24 +82,23 @@ func TestParseBuzzPollExtractsFromNoise(t *testing.T) {
 }
 
 func TestParseBuzzPollSurfacesCLIError(t *testing.T) {
-	out := "CHAN\nJSON_BEGIN\n[]\nJSON_END\n" +
-		`BUZZ_ERR {"error":"auth","message":"invalid private key"}` + "\n"
-	// empty CHAN + empty messages is OK; with BUZZ_ERR and empty useful data we
-	// only surface err when JSON body itself is bad. Force bad body:
-	out = "CHAN x\nJSON_BEGIN\nnot-json\nJSON_END\n" +
-		`BUZZ_ERR {"error":"auth","message":"invalid private key"}` + "\n"
+	errJSON := `{"error":"auth","message":"invalid private key"}`
+	out := "CHAN x\nRC 3\nB64 " + b64s("") + "\nERRB64 " + b64s(errJSON) + "\n"
 	msg := parseBuzzPoll(4, out)
 	if msg.err == nil || !strings.Contains(msg.err.Error(), "invalid private key") {
 		t.Fatalf("expected buzz-cli auth error, got %v", msg.err)
 	}
 }
 
-func TestMarkerValue(t *testing.T) {
-	out := "noise\nOILSAND_BUZZ_OPERATOR_KEY deadbeef\nOILSAND_BUZZ_CHANNEL_ID uuid-here\n"
-	if got := markerValue(out, "OILSAND_BUZZ_OPERATOR_KEY"); got != "deadbeef" {
-		t.Fatalf("got %q", got)
+func TestParseBuzzPollIgnoresMOTDAroundB64(t *testing.T) {
+	payload := `[{"content":"ok","pubkey":"aa"}]`
+	out := "Authorized keys warning\nCHAN c1\nRC 0\nB64 " + b64s(payload) + "\nERRB64 " + b64s("") + "\n"
+	msg := parseBuzzPoll(5, out)
+	if msg.err != nil || len(msg.lines) != 1 || msg.lines[0].text != "ok" {
+		t.Fatalf("msg=%+v err=%v", msg, msg.err)
 	}
-	if got := markerValue(out, "OILSAND_BUZZ_CHANNEL_ID"); got != "uuid-here" {
-		t.Fatalf("got %q", got)
-	}
+}
+
+func b64s(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }

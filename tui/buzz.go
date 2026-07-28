@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -160,17 +161,20 @@ fi
 echo "[buzz] starting compose stack…"
 sudo BUZZ_COMPOSE_TLS=false ./run.sh start
 
-# Install buzz CLI from the image onto the host.
-if ! command -v buzz >/dev/null 2>&1; then
-  echo "[buzz] installing buzz-cli from $IMG…"
-  CID=$(sudo docker create "$IMG")
-  sudo docker cp "$CID:/usr/local/bin/buzz" /usr/local/bin/buzz 2>/dev/null \
-    || sudo docker cp "$CID:/app/buzz" /usr/local/bin/buzz 2>/dev/null \
-    || sudo docker cp "$CID:/usr/bin/buzz" /usr/local/bin/buzz 2>/dev/null \
-    || true
-  sudo docker rm -f "$CID" >/dev/null 2>&1 || true
-  sudo chmod +x /usr/local/bin/buzz 2>/dev/null || true
+# Always (re)install buzz-cli from the image so host PATH has a working binary.
+echo "[buzz] installing buzz-cli from $IMG…"
+sudo docker pull "$IMG" >/dev/null 2>&1 || true
+CID=$(sudo docker create "$IMG")
+sudo docker cp "$CID:/usr/local/bin/buzz" /usr/local/bin/buzz 2>/dev/null \
+  || sudo docker cp "$CID:/app/buzz" /usr/local/bin/buzz 2>/dev/null \
+  || sudo docker cp "$CID:/usr/bin/buzz" /usr/local/bin/buzz 2>/dev/null \
+  || true
+sudo docker rm -f "$CID" >/dev/null 2>&1 || true
+sudo chmod +x /usr/local/bin/buzz 2>/dev/null || true
+if ! command -v buzz >/dev/null 2>&1 && [ ! -x /usr/local/bin/buzz ]; then
+  echo "[buzz] WARNING: could not extract buzz-cli; poll will use docker run fallback" >&2
 fi
+export PATH="/usr/local/bin:$PATH"
 
 # Wait for liveness.
 ok=0
@@ -187,22 +191,37 @@ fi
 sudo firewall-cmd --permanent --add-port=$PORT/tcp >/dev/null 2>&1 && sudo firewall-cmd --reload >/dev/null 2>&1 || true
 
 export BUZZ_RELAY_URL="http://127.0.0.1:$PORT"
-export BUZZ_PRIVATE_KEY="$(sudo cat operator.key)"
+export BUZZ_PRIVATE_KEY="$(sudo cat operator.key | tr -d '\r\n')"
+export PATH="/usr/local/bin:$PATH"
+# buzz helper: host binary or docker image entrypoint.
+buzz_run() {
+  if [ -x /usr/local/bin/buzz ]; then
+    /usr/local/bin/buzz "$@"
+    return $?
+  fi
+  if command -v buzz >/dev/null 2>&1; then
+    buzz "$@"
+    return $?
+  fi
+  sudo docker run --rm --network host \
+    -e BUZZ_RELAY_URL -e BUZZ_PRIVATE_KEY \
+    --entrypoint buzz "$IMG" "$@"
+}
 # Ensure default channel.
 CHAN_ID=""
-if command -v buzz >/dev/null 2>&1; then
-  LIST=$(buzz channels list 2>/dev/null || true)
-  CHAN_ID=$(printf '%%s' "$LIST" | grep -i "\"name\"[[:space:]]*:[[:space:]]*\"$CHAN\"" -B5 -A5 | grep -oE '[0-9a-f-]{36}' | head -n1 || true)
-  if [ -z "$CHAN_ID" ]; then
-    OUT=$(buzz channels create --name "$CHAN" --type stream --visibility open 2>/dev/null || true)
-    CHAN_ID=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f-]{36}' | head -n1 || true)
-  fi
-  if [ -n "$CHAN_ID" ]; then
-    buzz channels join --channel "$CHAN_ID" >/dev/null 2>&1 || true
-    printf '%%s\n' "$CHAN_ID" | sudo tee channel.id >/dev/null
-  fi
-  buzz users set-presence --status online >/dev/null 2>&1 || true
+LIST=$(buzz_run channels list 2>/dev/null || true)
+CHAN_ID=$(printf '%%s' "$LIST" | grep -i "\"name\"[[:space:]]*:[[:space:]]*\"$CHAN\"" -B5 -A5 | grep -oE '[0-9a-f-]{36}' | head -n1 || true)
+if [ -z "$CHAN_ID" ]; then
+  OUT=$(buzz_run channels create --name "$CHAN" --type stream --visibility open 2>/dev/null || true)
+  CHAN_ID=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f-]{36}' | head -n1 || true)
 fi
+if [ -n "$CHAN_ID" ]; then
+  buzz_run channels join --channel "$CHAN_ID" >/dev/null 2>&1 || true
+  printf '%%s\n' "$CHAN_ID" | sudo tee channel.id >/dev/null
+else
+  echo "[buzz] WARNING: could not create/find channel '$CHAN' — check buzz-cli output above" >&2
+fi
+buzz_run users set-presence --status online >/dev/null 2>&1 || true
 
 echo "[buzz] ready at http://$IP:$PORT (ws://$IP:$PORT)"
 echo "OILSAND_BUZZ_OPERATOR_KEY $(sudo cat operator.key)"
@@ -350,30 +369,48 @@ func (m *model) pollBuzzCmd(gen int) tea.Cmd {
 		if opKey == "" || relay == "" {
 			return buzzPollMsg{gen: gen, err: fmt.Errorf("missing Buzz credentials — ctrl+d to deploy")}
 		}
-		// Isolate JSON on stdout between markers. buzz-cli prints JSON on stdout and
-	// errors as JSON on stderr; CombinedOutput/MOTD/presence noise must not
-	// poison the feed parser.
-	script := fmt.Sprintf(`export BUZZ_RELAY_URL='%s' BUZZ_PRIVATE_KEY='%s' PATH="/usr/local/bin:$PATH"
+		// Base64-frame stdout/stderr so SSH MOTD, ANSI, and banners cannot
+		// corrupt JSON parsing. Prefer host buzz-cli; fall back to docker run
+		// of the Buzz image (same binary deploy installs).
+		script := fmt.Sprintf(`set +e
+export PATH="/usr/local/bin:$PATH"
+export BUZZ_RELAY_URL='%s'
+export BUZZ_PRIVATE_KEY='%s'
+IMG='%s'
+DIR='%s'
 CHAN='%s'
-if [ -z "$CHAN" ] && [ -f %s/channel.id ]; then CHAN=$(sudo cat %s/channel.id 2>/dev/null | tr -d '\r\n'); fi
-if [ -z "$CHAN" ] && [ -r %s/channel.id ]; then CHAN=$(tr -d '\r\n' < %s/channel.id); fi
+if [ -z "$CHAN" ] && [ -f "$DIR/channel.id" ]; then CHAN=$(sudo cat "$DIR/channel.id" 2>/dev/null | tr -d '\r\n'); fi
+if [ -z "$CHAN" ] && [ -r "$DIR/channel.id" ]; then CHAN=$(tr -d '\r\n' < "$DIR/channel.id"); fi
 echo "CHAN $CHAN"
-buzz users set-presence --status online >/dev/null 2>&1 || true
-ERRF=$(mktemp)
-OUTF=$(mktemp)
+buzz_run() {
+  if command -v buzz >/dev/null 2>&1; then
+    buzz "$@"
+    return $?
+  fi
+  if command -v sudo >/dev/null 2>&1 && sudo docker image inspect "$IMG" >/dev/null 2>&1; then
+    sudo docker run --rm --network host \
+      -e BUZZ_RELAY_URL -e BUZZ_PRIVATE_KEY \
+      --entrypoint buzz "$IMG" "$@"
+    return $?
+  fi
+  echo '{"error":"missing","message":"buzz-cli not installed — ctrl+d to (re)deploy Buzz"}' >&2
+  return 127
+}
+OUTF=$(mktemp); ERRF=$(mktemp)
 if [ -n "$CHAN" ]; then
-  buzz --format json messages get --channel "$CHAN" --limit 40 >"$OUTF" 2>"$ERRF" || true
+  buzz_run messages get --channel "$CHAN" --limit 40 >"$OUTF" 2>"$ERRF"
+  RC=$?
 else
-  buzz --format json channels list >"$OUTF" 2>"$ERRF" || true
+  buzz_run channels list >"$OUTF" 2>"$ERRF"
+  RC=$?
 fi
-echo "JSON_BEGIN"
-if [ -s "$OUTF" ]; then cat "$OUTF"; else echo '[]'; fi
-echo
-echo "JSON_END"
-if [ -s "$ERRF" ]; then echo "BUZZ_ERR $(tr '\n' ' ' < "$ERRF")"; fi
+# Presence is best-effort and must not affect the feed RC.
+buzz_run users set-presence --status online >/dev/null 2>&1 || true
+echo "RC $RC"
+echo "B64 $(base64 -w0 < "$OUTF" 2>/dev/null || base64 < "$OUTF" | tr -d '\n')"
+echo "ERRB64 $(base64 -w0 < "$ERRF" 2>/dev/null || base64 < "$ERRF" | tr -d '\n')"
 rm -f "$OUTF" "$ERRF"
-`, shSingle(relay), shSingle(opKey), shSingle(chanID),
-		buzzInstallDir, buzzInstallDir, buzzInstallDir, buzzInstallDir)
+`, shSingle(relay), shSingle(opKey), buzzImage, buzzInstallDir, shSingle(chanID))
 		var out string
 		var err error
 		if local {
@@ -387,66 +424,92 @@ rm -f "$OUTF" "$ERRF"
 			defer client.Close()
 			out, err = runSSH(client, script)
 		}
-		if err != nil {
-			return buzzPollMsg{gen: gen, err: fmt.Errorf("%v: %s", err, lastNonEmptyLine(out))}
-		}
+		// Non-zero RC is fine: stderr is framed; parseBuzzPoll surfaces it.
+		_ = err
 		return parseBuzzPoll(gen, out)
 	}
 }
 
 func parseBuzzPoll(gen int, out string) buzzPollMsg {
 	msg := buzzPollMsg{gen: gen, identity: buzzOperatorName}
-	lines := strings.Split(out, "\n")
-	var buzzErr string
-	var jsonParts []string
-	inJSON := false
-	sawMarker := false
-	for _, ln := range lines {
+	var b64Out, b64Err, buzzErr string
+	var rc int
+	sawFrame := false
+	for _, ln := range strings.Split(out, "\n") {
 		trim := strings.TrimSpace(ln)
 		switch {
 		case strings.HasPrefix(trim, "CHAN "):
 			msg.channel = strings.TrimSpace(strings.TrimPrefix(trim, "CHAN "))
+		case strings.HasPrefix(trim, "RC "):
+			_, _ = fmt.Sscanf(trim, "RC %d", &rc)
+			sawFrame = true
+		case strings.HasPrefix(trim, "B64 "):
+			b64Out = strings.TrimSpace(strings.TrimPrefix(trim, "B64 "))
+			sawFrame = true
+		case strings.HasPrefix(trim, "ERRB64 "):
+			b64Err = strings.TrimSpace(strings.TrimPrefix(trim, "ERRB64 "))
+			sawFrame = true
 		case strings.HasPrefix(trim, "BUZZ_ERR "):
+			// legacy poll framing
 			buzzErr = strings.TrimSpace(strings.TrimPrefix(trim, "BUZZ_ERR "))
-		case trim == "JSON_BEGIN":
-			inJSON, sawMarker = true, true
-			jsonParts = jsonParts[:0]
-		case trim == "JSON_END":
-			inJSON = false
-		case inJSON:
-			jsonParts = append(jsonParts, ln)
+		case strings.HasPrefix(trim, "JSON_BEGIN"):
+			// legacy: collect until JSON_END handled below via extract
 		}
 	}
-	body := strings.TrimSpace(strings.Join(jsonParts, "\n"))
-	if !sawMarker {
-		// Older poll script / partial output: scrape any JSON blob from the text.
-		body = extractJSONPayload(out)
+	body := ""
+	if b64Out != "" {
+		if raw, err := decodeB64(b64Out); err == nil {
+			body = strings.TrimSpace(string(raw))
+		}
+	}
+	if b64Err != "" {
+		if raw, err := decodeB64(b64Err); err == nil {
+			buzzErr = strings.TrimSpace(string(raw))
+		}
+	}
+	// Legacy fallbacks (pre-base64 poll script / partial output).
+	if body == "" && !sawFrame {
+		body = extractJSONBetweenMarkers(out)
+		if body == "" {
+			body = extractJSONPayload(out)
+		}
 	}
 	if body == "" {
 		body = "[]"
 	}
+	// Strip ANSI / CR so pretty terminals don't poison Unmarshal.
+	body = stripANSI(strings.ReplaceAll(body, "\r", ""))
 
 	raw, err := decodeBuzzJSON(body)
 	if err != nil {
-		// Prefer the CLI's own error JSON when stdout was empty/unusable.
+		// Prefer CLI error JSON when stdout was unusable.
 		if buzzErr != "" {
-			if eraw, e2 := decodeBuzzJSON(extractJSONPayload(buzzErr)); e2 == nil {
-				if obj, ok := eraw.(map[string]any); ok {
-					if m := buzzStr(obj, "message", "error", "detail"); m != "" {
-						msg.err = fmt.Errorf("buzz-cli: %s", m)
-						return msg
-					}
-				}
+			if m := buzzErrorMessage(buzzErr); m != "" {
+				msg.err = fmt.Errorf("buzz-cli: %s", m)
+				return msg
 			}
-			msg.err = fmt.Errorf("buzz-cli: %s", truncate(buzzErr, 160))
+			msg.err = fmt.Errorf("buzz-cli: %s", truncate(strings.ReplaceAll(buzzErr, "\n", " "), 160))
 			return msg
 		}
-		msg.err = fmt.Errorf("could not parse buzz-cli JSON: %s", truncate(strings.ReplaceAll(body, "\n", " "), 120))
+		// Soft-fail: empty feed + diagnostic line rather than blocking the tab.
+		// Still surface a short notice so deploy problems are visible.
+		msg.lines = []buzzLine{{sys: true, text: "could not parse feed (" + truncate(strings.ReplaceAll(body, "\n", " "), 80) + ")"}}
+		if rc != 0 {
+			msg.err = fmt.Errorf("buzz-cli exit %d (unreadable output) — ctrl+d to redeploy Buzz", rc)
+		} else {
+			msg.err = fmt.Errorf("could not parse buzz-cli JSON — ctrl+d to redeploy Buzz")
+		}
 		return msg
 	}
-	// Top-level error object from buzz-cli (sometimes printed on stdout).
 	if obj, ok := raw.(map[string]any); ok {
 		if m := buzzStr(obj, "message"); m != "" && buzzStr(obj, "error") != "" {
+			msg.err = fmt.Errorf("buzz-cli: %s", m)
+			return msg
+		}
+	}
+	// Non-zero RC with empty/usable body: surface stderr if present.
+	if rc != 0 && buzzErr != "" && len(buzzJSONArray(raw)) == 0 {
+		if m := buzzErrorMessage(buzzErr); m != "" {
 			msg.err = fmt.Errorf("buzz-cli: %s", m)
 			return msg
 		}
@@ -454,7 +517,6 @@ func parseBuzzPoll(gen int, out string) buzzPollMsg {
 
 	arr := buzzJSONArray(raw)
 	if arr == nil {
-		// Single event object — treat as one-line feed.
 		if obj, ok := raw.(map[string]any); ok {
 			arr = []any{obj}
 		}
@@ -474,17 +536,13 @@ func parseBuzzPoll(gen int, out string) buzzPollMsg {
 			}
 			continue
 		}
-		// Nostr kind:0 profile content is JSON — skip as chat lines.
 		if strings.HasPrefix(strings.TrimSpace(text), "{") && from != "" && !strings.Contains(text, " ") {
-			if _, ok := peers[from]; !ok {
-				peers[from] = struct{}{}
-			}
+			peers[from] = struct{}{}
 			continue
 		}
 		if from != "" {
 			peers[from] = struct{}{}
 		}
-		// Compact display for long hex pubkeys.
 		disp := from
 		if len(disp) == 64 && isHex64(disp) {
 			disp = disp[:8] + "…"
@@ -498,18 +556,91 @@ func parseBuzzPoll(gen int, out string) buzzPollMsg {
 		}
 		msg.peers = append(msg.peers, disp)
 	}
-	// Empty channel is success — not a parse error.
 	return msg
+}
+
+func decodeB64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty")
+	}
+	// Accept std and raw encodings.
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.RawStdEncoding.DecodeString(s)
+}
+
+func buzzErrorMessage(errBody string) string {
+	payload := extractJSONPayload(errBody)
+	if payload == "" {
+		payload = errBody
+	}
+	raw, err := decodeBuzzJSON(payload)
+	if err != nil {
+		return ""
+	}
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return buzzStr(obj, "message", "error", "detail")
+}
+
+func extractJSONBetweenMarkers(out string) string {
+	const begin, end = "JSON_BEGIN", "JSON_END"
+	lines := strings.Split(out, "\n")
+	var parts []string
+	in := false
+	for _, ln := range lines {
+		trim := strings.TrimSpace(ln)
+		if trim == begin {
+			in = true
+			parts = parts[:0]
+			continue
+		}
+		if trim == end {
+			break
+		}
+		if in {
+			parts = append(parts, ln)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func stripANSI(s string) string {
+	// Minimal CSI sequence stripper: ESC [ ... letter
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			i += 2
+			for i < len(s) && (s[i] < 0x40 || s[i] > 0x7e) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func decodeBuzzJSON(body string) (any, error) {
 	body = strings.TrimSpace(body)
-	if body == "" {
+	if body == "" || body == "null" {
 		return []any{}, nil
 	}
 	var raw any
 	if err := json.Unmarshal([]byte(body), &raw); err == nil {
 		return raw, nil
+	}
+	// Retry after extracting embedded JSON (banners/warnings before the payload).
+	if payload := extractJSONPayload(body); payload != "" && payload != body {
+		if err := json.Unmarshal([]byte(payload), &raw); err == nil {
+			return raw, nil
+		}
+		body = payload
 	}
 	// NDJSON: one object per line.
 	var arr []any
@@ -623,22 +754,35 @@ func (m *model) sendBuzz() tea.Cmd {
 	m.hubFeed = append(m.hubFeed, buzzLine{from: buzzOperatorName, text: text, ts: time.Now().Format(time.RFC3339)})
 	m.renderBuzz()
 	return func() tea.Msg {
-		script := fmt.Sprintf(`export BUZZ_RELAY_URL='%s' BUZZ_PRIVATE_KEY='%s' PATH="/usr/local/bin:$PATH"
-buzz messages send --channel '%s' --content '%s'
-`, shSingle(relay), shSingle(opKey), shSingle(chanID), shSingle(text))
+		// Content is base64-passed to avoid shell quoting breakage.
+		contentB64 := base64.StdEncoding.EncodeToString([]byte(text))
+		script := fmt.Sprintf(`export PATH="/usr/local/bin:$PATH"
+export BUZZ_RELAY_URL='%s' BUZZ_PRIVATE_KEY='%s'
+IMG='%s'
+CONTENT=$(printf '%%s' '%s' | base64 -d)
+buzz_run() {
+  if [ -x /usr/local/bin/buzz ]; then /usr/local/bin/buzz "$@"; return $?; fi
+  if command -v buzz >/dev/null 2>&1; then buzz "$@"; return $?; fi
+  sudo docker run --rm --network host -e BUZZ_RELAY_URL -e BUZZ_PRIVATE_KEY \
+    --entrypoint buzz "$IMG" "$@"
+}
+buzz_run messages send --channel '%s' --content "$CONTENT"
+`, shSingle(relay), shSingle(opKey), buzzImage, contentB64, shSingle(chanID))
+		var out string
 		var err error
 		if local {
-			_, err = exec.Command("bash", "-c", script).CombinedOutput()
+			raw, e := exec.Command("bash", "-c", script).CombinedOutput()
+			out, err = string(raw), e
 		} else {
 			client, e := dialSSH(host, user, pass)
 			if e != nil {
 				return notifyMsg("buzz send failed: " + e.Error())
 			}
 			defer client.Close()
-			_, err = runSSH(client, script)
+			out, err = runSSH(client, script)
 		}
 		if err != nil {
-			return notifyMsg("buzz send failed: " + err.Error())
+			return notifyMsg("buzz send failed: " + truncate(lastNonEmptyLine(out)+" "+err.Error(), 160))
 		}
 		return nil
 	}
