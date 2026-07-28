@@ -141,9 +141,21 @@ func (m *model) startUpdatePlan(steps []updateStep, label string) tea.Cmd {
 }
 
 // localInstallerScript returns the one-line installer command for this OS.
+// On Windows the script is invoked via powershell -File after download so a
+// running oilsand-tui can self-update (install.ps1 renames the locked exe).
+// Piping irm|iex still works from a plain shell; the Update section prefers
+// a more reliable -File path when possible.
 func localInstallerScript() string {
 	if runtime.GOOS == "windows" {
-		return "irm " + installerBaseURL + "/install.ps1 | iex"
+		// Download then -File: clearer errors than irm|iex under -Command, and
+		// avoids some ExecutionPolicy / pipeline quirks inside the TUI child.
+		url := installerBaseURL + "/install.ps1"
+		return "$ProgressPreference='SilentlyContinue'; " +
+			"$p=Join-Path $env:TEMP ('oilsand-install-'+[guid]::NewGuid().ToString('n')+'.ps1'); " +
+			"Invoke-WebRequest -UseBasicParsing -Uri '" + url + "' -OutFile $p; " +
+			"try { & powershell -NoProfile -ExecutionPolicy Bypass -File $p; $c=$LASTEXITCODE } " +
+			"finally { Remove-Item -Force $p -ErrorAction SilentlyContinue }; " +
+			"if ($null -eq $c) { $c=0 }; exit $c"
 	}
 	return "curl -fsSL " + installerBaseURL + "/install.sh | sh"
 }

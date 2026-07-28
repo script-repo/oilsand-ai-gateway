@@ -1745,8 +1745,10 @@ func (m model) handleProc(ev ProcEvent) (tea.Model, tea.Cmd) {
 			m.logLines = append(m.logLines, fmt.Sprintf("<<< failed (rc=%d)", ev.Code))
 			if wasLocalOlla {
 				m.notice = fmt.Sprintf("local Olla install failed (rc=%d) — see Output; passwordless sudo may be required", ev.Code)
+			} else if m.section == secUpdate {
+				m.notice = fmt.Sprintf("update failed (rc=%d) — see Output for the step error", ev.Code)
 			} else {
-				m.notice = fmt.Sprintf("deploy/delete failed (rc=%d)", ev.Code)
+				m.notice = fmt.Sprintf("deploy/delete failed (rc=%d) — see Output", ev.Code)
 			}
 		}
 		m.renderLog()

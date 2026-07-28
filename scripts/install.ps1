@@ -52,19 +52,74 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("oilsand-" + [System.Guid]::
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
 try {
   $zip = Join-Path $tmp $Asset
+  $stage = Join-Path $tmp 'stage'
   Info "downloading $Asset ($Version)"
   Invoke-WebRequest -Headers @{ 'User-Agent' = 'oilsand-install' } -Uri $Url -OutFile $zip
 
+  Info "extracting to staging area"
+  New-Item -ItemType Directory -Path $stage -Force | Out-Null
+  Expand-Archive -Path $zip -DestinationPath $stage -Force
+
+  # GoReleaser may nest files one level deep or flat — normalize to $stage root.
+  $nested = Get-ChildItem -LiteralPath $stage -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName "$BinName.exe") } |
+    Select-Object -First 1
+  $srcRoot = if ($nested) { $nested.FullName } else { $stage }
+
+  $newExe = Join-Path $srcRoot "$BinName.exe"
+  if (-not (Test-Path -LiteralPath $newExe)) {
+    Fail "binary not found in archive: expected $BinName.exe under $srcRoot"
+  }
+
   Info "installing to $InstallDir"
-  if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-  Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
+
+  # Self-update safe copy: never Remove-Item the whole install dir while
+  # oilsand-tui.exe may be the currently running process (Windows locks it and
+  # the Update section used to fail with deploy/delete failed rc=1).
+  Get-ChildItem -LiteralPath $srcRoot -Force | ForEach-Object {
+    $dest = Join-Path $InstallDir $_.Name
+    if ($_.PSIsContainer) {
+      if (Test-Path -LiteralPath $dest) {
+        # Keep an existing venv; refresh scripts/ and other trees.
+        if ($_.Name -eq 'venv') {
+          Info "keeping existing venv (will refresh pip deps below)"
+          return
+        }
+        Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+      }
+      Copy-Item -LiteralPath $_.FullName -Destination $dest -Recurse -Force
+      return
+    }
+    if ($_.Name -eq "$BinName.exe") {
+      # Replace running binary via rename dance when the target is locked.
+      $bak = Join-Path $InstallDir "$BinName.exe.old"
+      if (Test-Path -LiteralPath $dest) {
+        Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+        try {
+          Move-Item -LiteralPath $dest -Destination $bak -Force
+        } catch {
+          # Still locked under another name — try direct overwrite (fails if locked).
+          Info "could not retire previous binary ($($_.Exception.Message)); trying overwrite"
+        }
+      }
+      try {
+        Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+      } catch {
+        Fail "could not install $BinName.exe while it is running. Close oilsand-tui and re-run: irm https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.ps1 | iex"
+      }
+      # Best-effort cleanup of previous binary; ignore if still mapped.
+      Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+      return
+    }
+    Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+  }
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
 $exe = Join-Path $InstallDir "$BinName.exe"
-if (-not (Test-Path $exe)) { Fail "binary not found after extraction: $exe" }
+if (-not (Test-Path -LiteralPath $exe)) { Fail "binary not found after extraction: $exe" }
 
 # Add the install dir to the user PATH if missing.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

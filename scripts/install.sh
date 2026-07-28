@@ -68,7 +68,29 @@ dl "$URL" "$tmp/$ASSET" || fail "download failed: $URL"
 
 info "installing to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-tar -xzf "$tmp/$ASSET" -C "$INSTALL_DIR"
+# Extract to a staging dir then copy so we don't wipe venv/config first, and a
+# running oilsand-tui (Update local machine) is replaced cleanly on Unix.
+stage="$tmp/stage"
+mkdir -p "$stage"
+tar -xzf "$tmp/$ASSET" -C "$stage"
+# Flatten one nesting level if the tarball has a single top-level directory.
+if [ ! -f "$stage/$BIN_NAME" ]; then
+  set -- "$stage"/*/
+  if [ -f "${1}${BIN_NAME}" ]; then
+    stage="${1%/}"
+  fi
+fi
+[ -f "$stage/$BIN_NAME" ] || fail "binary not found in archive: $BIN_NAME"
+# Preserve an existing venv across upgrades.
+if [ -d "$INSTALL_DIR/venv" ] && [ -d "$stage/venv" ]; then
+  rm -rf "$stage/venv"
+fi
+# Copy payload over the install dir (running binary can be unlinked on Unix).
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a "$stage"/ "$INSTALL_DIR"/
+else
+  (cd "$stage" && tar cf - .) | (cd "$INSTALL_DIR" && tar xf -)
+fi
 chmod +x "$INSTALL_DIR/$BIN_NAME" 2>/dev/null || true
 
 # Best-effort: link the binary onto PATH.
