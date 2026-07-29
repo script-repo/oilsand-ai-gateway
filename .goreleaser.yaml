@@ -50,6 +50,8 @@ archives:
     # <archive>/scripts/... next to the binary (what vmScriptPath() expects).
     files:
       - scripts/nutanix_olla_vm.py
+      - scripts/install.sh
+      - scripts/install.ps1
       - scripts/remote/*
       - requirements.txt
       - README.md

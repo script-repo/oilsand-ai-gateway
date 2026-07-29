@@ -591,21 +591,31 @@ class Ssh:
 
 # --- Olla endpoint registry rendering --------------------------------------
 def render_olla_config(endpoints: Iterable[dict], port: int = OLLA_PORT) -> str:
+    # Must match scripts/remote/install-olla.sh defaults. An earlier stripped
+    # template used priority + 30s timeouts and overwrote a good gateway install
+    # on every worker registration, so cold loads 502'd and load never spread.
     lines = [
         "server:",
         '  host: "0.0.0.0"',
         f"  port: {port}",
         "  request_logging: true",
+        "  read_timeout: 900s",
+        "  write_timeout: 0s",
+        "  idle_timeout: 900s",
         "",
         "proxy:",
         '  engine: "sherpa"',
-        '  load_balancer: "priority"',
+        '  load_balancer: "least-connections"',
+        "  connection_timeout: 60s",
+        "  response_timeout: 900s",
+        "  read_timeout: 900s",
+        "  response_header_timeout: 900s",
         "",
         "discovery:",
         '  type: "static"',
         "  model_discovery:",
         "    enabled: true",
-        "    interval: 5m",
+        "    interval: 1m",
         "  static:",
         "    endpoints:",
     ]
@@ -712,26 +722,47 @@ def install_tui_on_guest(ssh: Ssh) -> bool:
     """Install the oilsand-tui on the guest as the unprivileged VM user, so an
     operator can SSH into the gateway and manage the pool from the box itself.
 
-    Reuses scripts/install.sh (the same one-line installer users run locally)
-    rather than duplicating release-download logic. Runs unprivileged so the
-    binary lands in the user's ~/.oilsand-ai-gateway; the installer escalates
-    with `sudo -n` on its own for the optional system packages, which the
-    cloud-init passwordless-sudo rule allows.
+    Prefers the bundled scripts/install.sh (shipped in the release archive). If
+    that file is missing (older releases), falls back to curling the raw
+    installer from GitHub main — same one-liner operators run by hand.
     """
-    installer = SCRIPTS_DIR / "install.sh"
-    if not installer.exists():
-        log(f"skipping oilsand-tui install: {installer} not found")
-        return False
     remote = "/tmp/install-oilsand-tui.sh"
+    installer = SCRIPTS_DIR / "install.sh"
     log("installing the oilsand-tui on the gateway")
-    # Normalize to LF so the guest's shell doesn't choke on Windows CRLF endings.
-    text = installer.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
-    ssh.put_text(text, remote)
-    rc, _out, _err = ssh.run(f"chmod +x {remote} && sh {remote}")
+    if installer.exists():
+        # Normalize to LF so the guest's shell doesn't choke on Windows CRLF endings.
+        text = installer.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        ssh.put_text(text, remote)
+        cmd = f"chmod +x {remote} && sh {remote}"
+    else:
+        log(f"bundled install.sh not found at {installer}; curling from GitHub")
+        cmd = (
+            "curl -fsSL https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.sh "
+            f"| tee {remote} >/dev/null && chmod +x {remote} && sh {remote}"
+        )
+    # Ensure ~/.local/bin is on PATH for future login shells (install.sh links there).
+    cmd += (
+        ' ; grep -q \'.local/bin\' "$HOME/.bashrc" 2>/dev/null '
+        '|| echo \'export PATH="$HOME/.local/bin:$PATH"\' >> "$HOME/.bashrc"'
+    )
+    rc, out, err = ssh.run(cmd)
     if rc != 0:
         log(f"warning: oilsand-tui install returned {rc}; the gateway itself is unaffected")
+        if err:
+            log(f"oilsand-tui install stderr: {err.strip()[:500]}")
+        if out:
+            log(f"oilsand-tui install stdout tail: {out.strip()[-500:]}")
         return False
-    return True
+    # Verify the binary landed.
+    vrc, vout, _ = ssh.run(
+        'export PATH="$HOME/.local/bin:$PATH"; command -v oilsand-tui || ls -la "$HOME/.oilsand-ai-gateway/oilsand-tui" 2>/dev/null',
+        stream=False,
+    )
+    if vrc == 0 and vout.strip():
+        log(f"oilsand-tui installed: {vout.strip().splitlines()[-1]}")
+        return True
+    log("warning: oilsand-tui install finished but binary not found on PATH")
+    return False
 
 
 def ssh_install(ip: str, args: argparse.Namespace, script_name: str, remote_args: str = "") -> Ssh:
@@ -800,7 +831,22 @@ def finish_pattern_a(ip: str, args: argparse.Namespace, vm_name: str, vm_ext_id:
     print("\n=== Pattern A report ===")
     print(json.dumps(report, indent=2))
     if not report["olla_service_active"]:
-        fatal("Olla service is not active")
+        fatal(
+            "Olla service is not active after install-olla.sh. "
+            f"SSH to {ip} and run: sudo systemctl status olla ; "
+            "sudo journalctl -u olla -n 50 --no-pager"
+        )
+    if not report["olla_http_ready"]:
+        log(
+            f"warning: Olla systemd is active but HTTP on :{OLLA_PORT} did not answer yet; "
+            "it may still be starting. Re-check with: curl -fsS "
+            f"http://{ip}:{OLLA_PORT}/internal/health"
+        )
+    if not tui_installed and not getattr(args, "no_install_tui", False):
+        log(
+            "warning: oilsand-tui was NOT installed on the gateway. "
+            f"On the guest run: curl -fsSL https://raw.githubusercontent.com/script-repo/oilsand-ai-gateway/main/scripts/install.sh | sh"
+        )
     log("Pattern A complete: Olla is installed and serving.")
     if tui_installed:
         log(f"manage it from the gateway: ssh {args.vm_user}@{ip} then run oilsand-tui")

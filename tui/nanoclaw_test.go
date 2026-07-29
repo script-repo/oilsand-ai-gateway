@@ -69,16 +69,18 @@ func TestNanoclawEmbeddedScriptsAvoidBackticks(t *testing.T) {
 }
 
 // The image must install OneCLI, write .env, and register an Olla-facing
-// secret for the OpenAI-compatible path.
+// secret. Claude Agent SDK uses Anthropic path; tools may use OpenAI path.
 func TestNanoclawImageShipsOllaWiring(t *testing.T) {
 	for _, want := range []string{
 		"/usr/local/bin/oilsand-configure-olla.sh",
 		"src/providers/oilsand-olla.ts",
-		"OILSAND_OLLA_OPENAI_URL",
+		"OILSAND_OLLA_ANTHROPIC_URL",
 		"onecli secrets create",
 		"OilsandOlla",
+		"ANTHROPIC_BASE_URL",
 		"OPENAI_BASE_URL",
 		"ONECLI_API_KEY",
+		"/olla/anthropic",
 		"/olla/openai/v1",
 	} {
 		if !strings.Contains(nanoclawDockerfile, want) {
@@ -110,24 +112,25 @@ func TestNanoclawDeployScriptPassesBuzzEnv(t *testing.T) {
 	}
 }
 
-// Oilsand wires Nanoclaw to Olla's OpenAI-compatible API (not Anthropic).
-func TestNanoclawDeployScriptPointsAtOpenAIOlla(t *testing.T) {
+// Claude brain → Anthropic Olla; tools → OpenAI Olla; OneCLI port published.
+func TestNanoclawDeployScriptPointsAtOlla(t *testing.T) {
 	m := newModel("http://10.0.0.1:40114", "rocky", "pw")
 	m.token = "test-token"
 	m.tokFile = filepath.Join(t.TempDir(), "tui.json")
 
 	script := m.nanoclawDeployScript(1)
 	for _, want := range []string{
+		"-e OILSAND_OLLA_ANTHROPIC_URL='http://10.0.0.1:40114/olla/anthropic'",
+		"-e ANTHROPIC_BASE_URL='http://10.0.0.1:40114/olla/anthropic'",
 		"-e OILSAND_OLLA_OPENAI_URL='http://10.0.0.1:40114/olla/openai/v1'",
 		"-e OPENAI_BASE_URL='http://10.0.0.1:40114/olla/openai/v1'",
 		"-e OILSAND_OLLA_TOKEN='test-token'",
+		"OILSAND_ONECLI_URL",
+		"10254",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("deploy script missing %q", want)
 		}
-	}
-	if strings.Contains(script, "OILSAND_OLLA_ANTHROPIC_URL=") || strings.Contains(script, "ANTHROPIC_BASE_URL=") {
-		t.Error("deploy must not set Anthropic Olla env (OpenAI path only)")
 	}
 }
 

@@ -102,6 +102,11 @@ if ln -sf "$INSTALL_DIR/$BIN_NAME" "$BIN_DIR/$BIN_NAME" 2>/dev/null; then
     *":$BIN_DIR:"*) : ;;
     *) info "add $BIN_DIR to your PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;;
   esac
+  # Persist for login shells (gateway VMs often lack ~/.local/bin on PATH).
+  if [ -f "$HOME/.bashrc" ] || touch "$HOME/.bashrc" 2>/dev/null; then
+    grep -qF '.local/bin' "$HOME/.bashrc" 2>/dev/null \
+      || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+  fi
 else
   info "run it directly:  $INSTALL_DIR/$BIN_NAME"
 fi

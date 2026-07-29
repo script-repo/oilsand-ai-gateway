@@ -153,7 +153,8 @@ func TestNanoclawDeployRebuildsStaleImage(t *testing.T) {
 		"sha256sum",             // hash of the staged Dockerfile…
 		nanoclawDockerfileLabel, // …compared against the image label
 		`--label "` + nanoclawDockerfileLabel + `=$DF_SHA"`, // and recorded on rebuild
-		nanoclawRecreateFragment,                            // existing containers move to the new image
+		"recreating $c on the new image",                    // existing containers move to the new image
+		"10254",                                             // OneCLI port preserved on recreate
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("deploy script missing %q:\n%s", want, script)
