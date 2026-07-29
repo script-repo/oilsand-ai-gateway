@@ -57,22 +57,26 @@ RUN curl -fsSL https://get.docker.com | sh \
 RUN corepack enable || npm install -g pnpm
 RUN git clone --depth 1 https://github.com/qwibitai/nanoclaw /opt/nanoclaw
 WORKDIR /opt/nanoclaw
-# Oilsand Olla provider: same shape as upstream src/providers/claude.ts, but
-# always registered so a deploy that writes ANTHROPIC_BASE_URL into .env
-# actually reaches agent containers. Without this import, trunk's empty
-# providers/index.ts never loads the custom-endpoint path and agents keep
-# aiming at api.anthropic.com. Built into dist/ below.
+# Oilsand Olla provider: inject OpenAI-compatible Olla base URL + placeholder
+# key into agent containers. OneCLI rewrites Authorization on the wire.
+# Trunk's empty providers/index.ts never loads custom endpoints without this.
 COPY <<'OLLA_PROVIDER_EOF' src/providers/oilsand-olla.ts
 import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', () => {
-  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
+  const dotenv = readEnvFile(['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'ANTHROPIC_BASE_URL']);
   const env: Record<string, string> = {};
-  if (dotenv.ANTHROPIC_BASE_URL) {
+  // Prefer OpenAI-compatible Olla endpoint (chat/completions).
+  if (dotenv.OPENAI_BASE_URL) {
+    env.OPENAI_BASE_URL = dotenv.OPENAI_BASE_URL;
+    env.OPENAI_API_KEY = dotenv.OPENAI_API_KEY || 'placeholder';
+    // Some Claude Code builds honor these for OpenAI-compat backends.
+    env.OPENAI_API_BASE = dotenv.OPENAI_BASE_URL;
+  }
+  // Do not set ANTHROPIC_BASE_URL here — Oilsand uses Olla OpenAI, not Anthropic.
+  if (dotenv.ANTHROPIC_BASE_URL && !dotenv.OPENAI_BASE_URL) {
     env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
-    // Placeholder: OneCLI's HTTP/HTTPS proxy rewrites Authorization on the
-    // wire using the vault secret keyed to the Olla hostname.
     env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
   }
   return { env };
@@ -92,10 +96,7 @@ RUN ln -sf /opt/nanoclaw/bin/ncl /usr/local/bin/ncl
 # just-built version marks this image as a sanctioned install. Guarded so
 # older upstream revisions without the tripwire still build.
 RUN [ ! -f scripts/upgrade-state.ts ] || pnpm exec tsx scripts/upgrade-state.ts set
-# Wire OneCLI + .env so NanoClaw agents call Olla. Trunk refuses to spawn
-# agent containers unless OneCLI's proxy is applied, and the Claude provider
-# only redirects to a custom endpoint when ANTHROPIC_BASE_URL is in .env.
-# This script is idempotent and runs every start (state lives in DinD volumes).
+# Wire OneCLI + .env so NanoClaw agents call Olla OpenAI. Idempotent; state on volume.
 COPY <<'OLLA_CFG_EOF' /usr/local/bin/oilsand-configure-olla.sh
 #!/bin/bash
 set -euo pipefail
@@ -111,24 +112,34 @@ ENV_FILE="/opt/nanoclaw/store/oilsand-nanoclaw.env"
 touch "$ENV_FILE"
 ln -sfn "$ENV_FILE" /opt/nanoclaw/.env
 
-OLLA_URL="${OILSAND_OLLA_ANTHROPIC_URL:-${ANTHROPIC_BASE_URL:-}}"
-TOKEN="${OILSAND_OLLA_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-olla}}"
+# Prefer explicit OpenAI URL; fall back to legacy anthropic env and rewrite.
+OLLA_URL="${OILSAND_OLLA_OPENAI_URL:-${OPENAI_BASE_URL:-${OILSAND_OLLA_ANTHROPIC_URL:-${ANTHROPIC_BASE_URL:-}}}}"
+TOKEN="${OILSAND_OLLA_TOKEN:-${OPENAI_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-olla}}}"
 MODEL="${OILSAND_OLLA_MODEL:-${NANOCLAW_MODEL:-}}"
 
 if [ -z "$OLLA_URL" ]; then
-  log "no Olla Anthropic URL set (OILSAND_OLLA_ANTHROPIC_URL); skipping"
+  log "no Olla OpenAI URL set (OILSAND_OLLA_OPENAI_URL); skipping"
   exit 0
 fi
 
-# Strip a trailing /v1 if a caller accidentally passed the OpenAI shape —
-# the Anthropic SDK appends /v1/messages itself. Also rewrite older TUI
-# deploys that pointed ANTHROPIC_BASE_URL at /olla/openai by mistake.
+# Normalize to OpenAI chat-completions base (.../olla/openai/v1).
 OLLA_URL="${OLLA_URL%/}"
-OLLA_URL="${OLLA_URL%/v1}"
 case "$OLLA_URL" in
-  */olla/openai*)
-    OLLA_URL="$(printf '%s' "$OLLA_URL" | sed -E 's|/olla/openai(/v1)?|/olla/anthropic|')"
-    log "rewrote OpenAI-shaped URL to Anthropic: $OLLA_URL"
+  */olla/anthropic*)
+    OLLA_URL="$(printf '%s' "$OLLA_URL" | sed -E 's|/olla/anthropic(/v1)?|/olla/openai/v1|')"
+    log "rewrote Anthropic-shaped URL to OpenAI: $OLLA_URL"
+    ;;
+  */olla/openai)
+    OLLA_URL="${OLLA_URL}/v1"
+    ;;
+  */olla/openai/v1) ;;
+  */v1) ;;
+  *)
+    # Bare gateway root → append openai path
+    case "$OLLA_URL" in
+      */olla/*) ;;
+      *) OLLA_URL="${OLLA_URL}/olla/openai/v1" ;;
+    esac
     ;;
 esac
 
@@ -137,7 +148,7 @@ if [ -z "$HOST" ] || [ "$HOST" = "$OLLA_URL" ]; then
   log "ERROR: could not parse hostname from $OLLA_URL"
   exit 1
 fi
-log "target Olla Anthropic API: $OLLA_URL (host=$HOST)"
+log "target Olla OpenAI API: $OLLA_URL (host=$HOST)"
 
 upsert_env() {
   local key="$1" val="$2" file="$ENV_FILE"
@@ -149,9 +160,16 @@ upsert_env() {
   printf '%s=%s\n' "$key" "$val" >> "$file"
 }
 
-upsert_env ANTHROPIC_BASE_URL "$OLLA_URL"
-# Token stays out of .env for the OneCLI path (vault holds it). MODEL is
-# informational for post-start ncl wiring.
+# OpenAI-compatible path (preferred). Drop stale Anthropic base so agents
+# do not keep calling /olla/anthropic.
+upsert_env OPENAI_BASE_URL "$OLLA_URL"
+upsert_env OPENAI_API_KEY "placeholder"
+# Remove Anthropic base if present so OneCLI/Claude do not prefer it.
+if grep -q '^ANTHROPIC_BASE_URL=' "$ENV_FILE" 2>/dev/null; then
+  grep -v '^ANTHROPIC_BASE_URL=' "$ENV_FILE" > "${ENV_FILE}.tmp" || true
+  mv "${ENV_FILE}.tmp" "$ENV_FILE"
+  log "removed ANTHROPIC_BASE_URL from .env (OpenAI path only)"
+fi
 if [ -n "$MODEL" ]; then
   upsert_env OILSAND_OLLA_MODEL "$MODEL"
 fi
@@ -304,7 +322,7 @@ if [ -n "$MODEL" ]; then
   ) >> /var/log/oilsand-olla.log 2>&1 &
 fi
 
-log "Olla wiring complete — .env has ANTHROPIC_BASE_URL + ONECLI_URL (+ API key if discovered)"
+log "Olla wiring complete — .env has OPENAI_BASE_URL + ONECLI_URL (+ API key if discovered)"
 OLLA_CFG_EOF
 RUN chmod +x /usr/local/bin/oilsand-configure-olla.sh
 # Join the Oilsand Buzz relay (block/buzz) as this instance. Presence only —
@@ -427,8 +445,8 @@ done
 # OneCLI + .env → Olla. Failure is loud but non-fatal for the outer process:
 # NanoClaw still starts (Buzz/shell work), and agent spawns will surface the
 # OneCLI error clearly in logs if wiring did not complete.
-if [ -n "${OILSAND_OLLA_ANTHROPIC_URL:-${ANTHROPIC_BASE_URL:-}}" ]; then
-  echo "[entrypoint] configuring OneCLI → Olla…"
+if [ -n "${OILSAND_OLLA_OPENAI_URL:-${OPENAI_BASE_URL:-${OILSAND_OLLA_ANTHROPIC_URL:-${ANTHROPIC_BASE_URL:-}}}}" ]; then
+  echo "[entrypoint] configuring OneCLI → Olla OpenAI…"
   /usr/local/bin/oilsand-configure-olla.sh >> /var/log/oilsand-olla.log 2>&1 \
     || echo "[entrypoint] WARNING: oilsand-configure-olla.sh failed — see /var/log/oilsand-olla.log" >&2
 fi
@@ -588,16 +606,14 @@ echo "[deploy] docker: $(sudo docker --version)"
 // Nanoclaw containers on one worker: Docker bootstrap, a one-time image build,
 // then a run loop that picks the next free nanoclaw-NN name so repeated deploys
 // keep adding instances instead of colliding. Each container receives Olla
-// Anthropic coordinates (OneCLI) and Buzz relay env so the baked-in join script
+// OpenAI coordinates (OneCLI) and Buzz relay env so the baked-in join script
 // can appear on the TUI's Buzz channel.
 func (m *model) nanoclawDeployScript(instances int) string {
 	if instances < 1 {
 		instances = 1
 	}
-	// Claude Agent SDK (NanoClaw's default provider) speaks Anthropic Messages
-	// API. Olla exposes that at /olla/anthropic (SDK appends /v1/messages).
+	// Oilsand uses Olla's OpenAI-compatible API (chat/completions) via OneCLI.
 	gw := strings.TrimRight(m.gateway, "/")
-	anthropicBase := gw + "/olla/anthropic"
 	openaiBase := gw + "/olla/openai/v1"
 	key := orDefault(m.token, "olla")
 	model := m.effDefaultModel()
@@ -635,11 +651,9 @@ for _i in $(seq 1 %d); do
   sudo docker run -d --restart unless-stopped --privileged --name "$NAME" \
     -v "oilsand-$NAME:/opt/nanoclaw/store" \
     -v "oilsand-$NAME-docker:/var/lib/docker" \
-    -e OILSAND_OLLA_ANTHROPIC_URL='%s' \
+    -e OILSAND_OLLA_OPENAI_URL='%s' \
     -e OILSAND_OLLA_TOKEN='%s' \
     -e OILSAND_OLLA_MODEL='%s' \
-    -e ANTHROPIC_BASE_URL='%s' \
-    -e ANTHROPIC_AUTH_TOKEN='%s' \
     -e OPENAI_BASE_URL='%s' \
     -e OPENAI_API_KEY='%s' \
     -e NANOCLAW_MODEL='%s' \
@@ -653,14 +667,13 @@ done
 echo "[deploy] nanoclaw instances on this worker:"
 sudo docker ps --filter name=nanoclaw- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
 echo "[deploy] started:$started — each instance is isolated in its own container (state volume oilsand-<name>)."
-echo "[deploy] OneCLI will be wired to Olla Anthropic API at %s on first boot (see /var/log/oilsand-olla.log)."
+echo "[deploy] OneCLI will be wired to Olla OpenAI API at %s on first boot (see /var/log/oilsand-olla.log)."
 echo "[deploy] Buzz join uses %s (see /var/log/oilsand-buzz.log); deploy Buzz from the TUI (ctrl+d) if empty."
 `, instances,
-		shSingle(anthropicBase), shSingle(key), shSingle(model),
-		shSingle(anthropicBase), shSingle(key),
+		shSingle(openaiBase), shSingle(key), shSingle(model),
 		shSingle(openaiBase), shSingle(key), shSingle(model),
 		shSingle(buzzRelay), shSingle(buzzChan), buzzChannelName,
-		anthropicBase, orDefault(buzzRelay, "(no gateway)")))
+		openaiBase, orDefault(buzzRelay, "(no gateway)")))
 	return b.String()
 }
 

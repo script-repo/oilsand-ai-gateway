@@ -94,11 +94,12 @@ func buzzDeployScript(gatewayIP string) string {
 	b.WriteString(buzzHostDepsBootstrap)
 	b.WriteString(fmt.Sprintf(`DIR='%s'
 IMG='%s'
-IP='%s'
+# Trim IP (gateway URLs / hostname -I can leave whitespace).
+IP="$(printf '%%s' '%s' | tr -d '[:space:]')"
 PORT='%s'
 CHAN='%s'
-# Canonical host for community tenancy. Browser Host header for :3000 is
-# "IP:3000"; RELAY_URL must yield that same authority or the web UI says
+# Canonical host for community tenancy. Browser/desktop Host for :3000 is
+# "IP:3000"; RELAY_URL must yield that same authority or clients get
 # "no community is configured for this host".
 HOST_AUTH="$IP:$PORT"
 sudo mkdir -p "$DIR"
@@ -124,12 +125,20 @@ sudo chmod +x "$DIR/run.sh" 2>/dev/null || true
 sudo docker pull "$IMG" >/dev/null
 
 # Owner keypair via buzz-admin generate-key (image has buzz-admin, NOT buzz-cli).
+# Output shape:
+#   Public key:  <64-hex>
+#   Secret key:  <64-hex or nsec1…>
 gen_owner() {
-  OUT=$(sudo docker run --rm --entrypoint buzz-admin "$IMG" generate-key 2>/dev/null || true)
-  # Expect lines with hex sk/pk somewhere in the output.
-  OP_SK=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f]{64}' | head -n1 || true)
-  OP_PK=$(printf '%%s' "$OUT" | grep -oE '[0-9a-f]{64}' | sed -n '2p' || true)
+  OUT=$(sudo docker run --rm --entrypoint buzz-admin "$IMG" generate-key 2>&1 || true)
+  OP_PK=$(printf '%%s\n' "$OUT" | sed -n 's/.*[Pp]ublic key:[[:space:]]*//p' | head -n1 | tr -d '[:space:]' | grep -oE '[0-9a-fA-F]{64}' | tr 'A-F' 'a-f' | head -n1 || true)
+  OP_SK=$(printf '%%s\n' "$OUT" | sed -n 's/.*[Ss]ecret key:[[:space:]]*//p' | head -n1 | tr -d '[:space:]' || true)
+  # Secret may be hex or nsec1…; accept either.
+  if ! printf '%%s' "$OP_SK" | grep -qE '^([0-9a-fA-F]{64}|nsec1[a-z0-9]+)$'; then
+    OP_SK=""
+  fi
   if [ -z "$OP_SK" ] || [ -z "$OP_PK" ]; then
+    echo "[buzz] WARNING: could not parse buzz-admin generate-key output; generating hex sk only" >&2
+    printf '%%s\n' "$OUT" | tail -n 20 >&2 || true
     OP_SK=$(openssl rand -hex 32)
     OP_PK=""
   fi
@@ -197,12 +206,11 @@ fi
 echo "[buzz] starting compose stack…"
 sudo BUZZ_COMPOSE_TLS=false ./run.sh start
 
-# Wait for liveness (health port 8080 inside container is published via app :3000 path).
+# Wait for liveness.
 ok=0
 for _ in $(seq 1 90); do
   if curl -fsS "http://127.0.0.1:$PORT/_liveness" >/dev/null 2>&1; then ok=1; break; fi
-  # Some builds only expose readiness on the internal health port via compose.
-  if curl -fsS "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then ok=1; break; fi
+  if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then ok=1; break; fi
   sleep 2
 done
 if [ "$ok" -ne 1 ]; then
@@ -212,25 +220,54 @@ if [ "$ok" -ne 1 ]; then
   exit 1
 fi
 
-# Force community seed: restart relay after URL rewrite so ensure_configured_community runs.
+# Restart relay so ensure_configured_community runs with the rewritten RELAY_URL.
 echo "[buzz] restarting relay to seed community for host $HOST_AUTH…"
 sudo BUZZ_COMPOSE_TLS=false ./run.sh restart || sudo docker compose --env-file .env -f compose.yml up -d --force-recreate relay
-sleep 5
+sleep 8
+
+# Belt-and-suspenders: insert community host rows directly in Postgres for every
+# Host header clients actually send (IP:port, bare IP, localhost variants).
+# ensure_configured_community does the same INSERT; this covers cases where
+# startup seed was skipped (empty authority / migrate race).
+echo "[buzz] ensuring communities.host rows for client Host headers…"
+set -a
+# shellcheck disable=SC1091
+. ./.env 2>/dev/null || true
+set +a
+PGUSER="${POSTGRES_USER:-buzz}"
+PGDB="${POSTGRES_DB:-buzz}"
+PGPASS="${POSTGRES_PASSWORD:-}"
+seed_host() {
+  h="$1"
+  [ -n "$h" ] || return 0
+  sudo docker compose --env-file .env -f compose.yml exec -T -e PGPASSWORD="$PGPASS" postgres \
+    psql -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 \
+    -c "INSERT INTO communities (host) VALUES ('$h') ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host;" \
+    >/dev/null 2>&1 \
+    && echo "[buzz] community host ok: $h" \
+    || echo "[buzz] WARNING: could not upsert communities.host=$h (migrations may still be running)" >&2
+}
+seed_host "$HOST_AUTH"
+seed_host "$IP"
+seed_host "127.0.0.1:$PORT"
+seed_host "localhost:$PORT"
+seed_host "127.0.0.1"
+seed_host "localhost"
 
 sudo firewall-cmd --permanent --add-port=$PORT/tcp >/dev/null 2>&1 && sudo firewall-cmd --reload >/dev/null 2>&1 || true
 
-# Channel id: best-effort via buzz-admin inside the running relay container.
-# The public image does NOT ship buzz-cli (only buzz-relay + buzz-admin).
 CHAN_ID=""
 if [ -f channel.id ]; then CHAN_ID=$(sudo cat channel.id 2>/dev/null | tr -d '\r\n'); fi
 if [ -z "$CHAN_ID" ]; then
-  # Placeholder UUID file so the TUI has a stable marker; feed works once channels exist.
   CHAN_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/')
   printf '%%s\n' "$CHAN_ID" | sudo tee channel.id >/dev/null
 fi
 
-echo "[buzz] ready — open http://$IP:$PORT in a browser (Host must be $HOST_AUTH)"
-echo "[buzz] if the UI still says no community, hard-refresh; community is seeded from RELAY_URL=ws://$HOST_AUTH"
+echo "[buzz] ready"
+echo "[buzz] desktop/browser Relay URL must be exactly:  ws://$HOST_AUTH"
+echo "[buzz] web UI:  http://$IP:$PORT"
+echo "[buzz] if you still see 'no community', wipe volumes once and redeploy:"
+echo "[buzz]   cd $DIR && sudo docker compose --env-file .env -f compose.yml down -v && sudo rm -f .env && re-run ctrl+d"
 echo "OILSAND_BUZZ_OPERATOR_KEY $(sudo cat operator.key | tr -d '\r\n')"
 echo "OILSAND_BUZZ_CHANNEL_ID $(sudo cat channel.id 2>/dev/null | tr -d '\r\n')"
 `, buzzInstallDir, buzzImage, shSingle(ip), buzzHTTPPort, buzzChannelName))
