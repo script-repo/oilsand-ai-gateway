@@ -82,13 +82,44 @@ func TestNanoclawImageShipsOllaWiring(t *testing.T) {
 		"ONECLI_API_KEY",
 		"/olla/anthropic",
 		"/olla/openai/v1",
+		"strip_olla_suffix", // bash-only URL peel (no sed | collision)
+		"oilsand-olla.failed",
 	} {
 		if !strings.Contains(nanoclawDockerfile, want) {
 			t.Errorf("Dockerfile missing Olla/OneCLI wiring %q", want)
 		}
 	}
-	if !strings.Contains(nanoclawDockerfile, "oilsand-configure-olla.sh >> /var/log/oilsand-olla.log") {
+	// The sed bug that killed configure under set -e: | used as both s///
+	// delimiter and regex alternation.
+	if strings.Contains(nanoclawDockerfile, `s|/olla/(anthropic|openai)`) {
+		t.Error("configure script still has sed |/alternation collision")
+	}
+	if !strings.Contains(nanoclawDockerfile, "oilsand-configure-olla.sh") {
 		t.Error("entrypoint does not run oilsand-configure-olla.sh")
+	}
+	// Wiring failure must exit the entrypoint (not soft-warn) when Olla env is set.
+	if strings.Contains(nanoclawDockerfile, "WARNING: oilsand-configure-olla.sh failed") {
+		t.Error("entrypoint still soft-fails Olla wiring; must exit 1")
+	}
+}
+
+func TestStripOllaGatewayRoot(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"http://10.0.0.1:40114/olla/anthropic", "http://10.0.0.1:40114"},
+		{"http://10.0.0.1:40114/olla/anthropic/", "http://10.0.0.1:40114"},
+		{"http://10.0.0.1:40114/olla/openai/v1", "http://10.0.0.1:40114"},
+		{"http://10.0.0.1:40114/olla/openai", "http://10.0.0.1:40114"},
+		{"http://10.0.0.1:40114/olla/openai/v1/", "http://10.0.0.1:40114"},
+		{"http://gw.example/olla/openai/v1", "http://gw.example"},
+		{"http://10.0.0.1:40114", "http://10.0.0.1:40114"},
+	}
+	for _, tc := range cases {
+		if got := stripOllaGatewayRoot(tc.in); got != tc.want {
+			t.Errorf("stripOllaGatewayRoot(%q)=%q want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := hostFromGatewayURL("http://10.0.0.1:40114"); got != "10.0.0.1" {
+		t.Errorf("hostFromGatewayURL=%q", got)
 	}
 }
 

@@ -21,6 +21,34 @@ import (
 
 const nanoclawImage = "oilsand/nanoclaw:latest"
 
+// stripOllaGatewayRoot mirrors oilsand-configure-olla.sh strip_olla_suffix:
+// peel trailing /v1 and /olla/{anthropic,openai} so both API shapes share one root.
+// Pure Go (no sed) so the derivation is unit-tested before shipping in the image.
+func stripOllaGatewayRoot(u string) string {
+	b := strings.TrimRight(strings.TrimSpace(u), "/")
+	b = strings.TrimSuffix(b, "/v1")
+	b = strings.TrimRight(b, "/")
+	for _, suf := range []string{"/olla/anthropic", "/olla/openai"} {
+		if strings.HasSuffix(b, suf) {
+			b = strings.TrimSuffix(b, suf)
+			break
+		}
+	}
+	return strings.TrimRight(b, "/")
+}
+
+// hostFromGatewayURL returns the hostname (no port) from an http(s) URL.
+func hostFromGatewayURL(u string) string {
+	u = strings.TrimSpace(u)
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[i+3:]
+	}
+	if i := strings.IndexAny(u, "/:"); i >= 0 {
+		u = u[:i]
+	}
+	return u
+}
+
 // nanoclawDockerfileLabel records, on the built image, the sha256 of the
 // Dockerfile it was built from. Deploys compare it against the staged
 // Dockerfile so a worker bootstrapped by an older TUI rebuilds instead of
@@ -120,14 +148,36 @@ TOKEN="${OILSAND_OLLA_TOKEN:-${ANTHROPIC_AUTH_TOKEN:-${OPENAI_API_KEY:-olla}}}"
 MODEL="${OILSAND_OLLA_MODEL:-${NANOCLAW_MODEL:-}}"
 GW_ROOT=""
 
+# Strip known Olla path suffixes with bash only — never sed 's|...|...|' with
+# alternation: GNU sed treats | inside the pattern as a delimiter when | is
+# also the s/// separator (errexit killed the whole script here).
+strip_olla_suffix() {
+  local b="$1"
+  b="${b%/}"
+  b="${b%/v1}"
+  case "$b" in
+    */olla/anthropic) b="${b%/olla/anthropic}" ;;
+    */olla/openai)    b="${b%/olla/openai}" ;;
+  esac
+  b="${b%/}"
+  printf '%s' "$b"
+}
+host_from_url() {
+  local u="$1" rest host
+  case "$u" in
+    *://*) rest="${u#*://}" ;;
+    *) rest="$u" ;;
+  esac
+  host="${rest%%/*}"
+  host="${host%%:*}"
+  printf '%s' "$host"
+}
+
 # Derive both shapes from whichever URL the deploy passed.
 for cand in "$ANTH_URL" "$OPEN_URL"; do
   [ -n "$cand" ] || continue
-  base="${cand%/}"
-  base="${base%/v1}"
-  base="$(printf '%s' "$base" | sed -E 's|/olla/(anthropic|openai)(/v1)?$||')"
-  GW_ROOT="$base"
-  break
+  GW_ROOT="$(strip_olla_suffix "$cand")"
+  [ -n "$GW_ROOT" ] && break
 done
 
 if [ -z "$GW_ROOT" ]; then
@@ -137,7 +187,7 @@ fi
 
 ANTH_URL="${GW_ROOT}/olla/anthropic"
 OPEN_URL="${GW_ROOT}/olla/openai/v1"
-HOST="$(printf '%s' "$GW_ROOT" | sed -E 's|^[a-zA-Z][a-zA-Z0-9+.-]*://([^/:]+).*|\1|')"
+HOST="$(host_from_url "$GW_ROOT")"
 if [ -z "$HOST" ] || [ "$HOST" = "$GW_ROOT" ]; then
   log "ERROR: could not parse hostname from $GW_ROOT"
   exit 1
@@ -252,11 +302,22 @@ if [ -z "$API_KEY" ]; then
   done
 fi
 if [ -n "$API_KEY" ]; then
-  upsert_env ONECLI_API_KEY "$API_KEY"
   onecli auth login --api-key "$API_KEY" >/dev/null 2>&1 || true
-  log "ONECLI_API_KEY present in .env"
-else
-  log "WARNING: could not discover ONECLI_API_KEY — agent spawns may refuse until one is set"
+  # Validate before persisting — a scraped oc_… that is not accepted leaves
+  # agents stuck on 401 against api.onecli.sh forever.
+  if onecli agents list >/dev/null 2>&1 \
+     || curl -fsS -H "Authorization: Bearer $API_KEY" "$ONECLI_URL/health" >/dev/null 2>&1 \
+     || curl -fsS -H "Authorization: Bearer $API_KEY" "$ONECLI_URL/api/health" >/dev/null 2>&1; then
+    upsert_env ONECLI_API_KEY "$API_KEY"
+    log "ONECLI_API_KEY validated and present in .env"
+  else
+    log "WARNING: discovered ONECLI_API_KEY failed validation — not persisting"
+    API_KEY=""
+  fi
+fi
+if [ -z "$API_KEY" ]; then
+  log "ERROR: could not discover a working ONECLI_API_KEY — agent spawns will fail"
+  exit 1
 fi
 
 # Register the Olla host as a generic Bearer secret (same shape as NanoClaw
@@ -434,13 +495,20 @@ for d in data groups; do
     ln -sfn "/opt/nanoclaw/store/$d" "/opt/nanoclaw/$d"
   fi
 done
-# OneCLI + .env → Olla. Failure is loud but non-fatal for the outer process:
-# NanoClaw still starts (Buzz/shell work), and agent spawns will surface the
-# OneCLI error clearly in logs if wiring did not complete.
+# OneCLI + .env → Olla. When Olla env was supplied this is load-bearing: a
+# silent failure leaves agents calling api.onecli.sh with no session (401).
+# Fail the entrypoint so --restart surfaces a crash loop instead of a green
+# but permanently broken container.
 if [ -n "${OILSAND_OLLA_ANTHROPIC_URL:-${OILSAND_OLLA_OPENAI_URL:-${ANTHROPIC_BASE_URL:-${OPENAI_BASE_URL:-}}}}" ]; then
   echo "[entrypoint] configuring OneCLI → Olla…"
-  /usr/local/bin/oilsand-configure-olla.sh >> /var/log/oilsand-olla.log 2>&1 \
-    || echo "[entrypoint] WARNING: oilsand-configure-olla.sh failed — see /var/log/oilsand-olla.log" >&2
+  if ! /usr/local/bin/oilsand-configure-olla.sh >> /var/log/oilsand-olla.log 2>&1; then
+    echo "[entrypoint] ERROR: oilsand-configure-olla.sh failed — see /var/log/oilsand-olla.log" >&2
+    printf 'failed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /opt/nanoclaw/store/oilsand-olla.failed
+    tail -n 40 /var/log/oilsand-olla.log >&2 || true
+    exit 1
+  fi
+  rm -f /opt/nanoclaw/store/oilsand-olla.failed
+  echo "[entrypoint] Olla/OneCLI wiring complete"
 fi
 # Surface OneCLI GUI URL for docker logs / operators (host port published at deploy).
 if [ -n "${OILSAND_ONECLI_PUBLISH_URL:-}" ]; then
