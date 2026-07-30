@@ -105,24 +105,27 @@ HOST_AUTH="$IP:$PORT"
 sudo mkdir -p "$DIR"
 cd "$DIR"
 
-# Stage compose bundle from upstream.
-if [ ! -f compose.yml ]; then
-  echo "[buzz] fetching deploy/compose from block/buzz…"
-  sudo rm -rf /tmp/oilsand-buzz-src
-  git clone --depth 1 --filter=blob:none --sparse https://github.com/block/buzz.git /tmp/oilsand-buzz-src 2>/dev/null \
-    || { rm -rf /tmp/oilsand-buzz-src; git clone --depth 1 https://github.com/block/buzz.git /tmp/oilsand-buzz-src; }
-  if [ -d /tmp/oilsand-buzz-src/.git ]; then
-    (cd /tmp/oilsand-buzz-src && git sparse-checkout set deploy/compose) 2>/dev/null || true
-  fi
-  if [ ! -d /tmp/oilsand-buzz-src/deploy/compose ]; then
-    echo "[buzz] ERROR: deploy/compose missing from block/buzz clone" >&2
-    exit 1
-  fi
-  sudo cp -a /tmp/oilsand-buzz-src/deploy/compose/. "$DIR"/
+# Always refresh compose files from upstream (keep .env / operator.key / volumes).
+echo "[buzz] refreshing deploy/compose from block/buzz…"
+sudo rm -rf /tmp/oilsand-buzz-src
+git clone --depth 1 --filter=blob:none --sparse https://github.com/block/buzz.git /tmp/oilsand-buzz-src 2>/dev/null \
+  || { rm -rf /tmp/oilsand-buzz-src; git clone --depth 1 https://github.com/block/buzz.git /tmp/oilsand-buzz-src; }
+if [ -d /tmp/oilsand-buzz-src/.git ]; then
+  (cd /tmp/oilsand-buzz-src && git sparse-checkout set deploy/compose) 2>/dev/null || true
 fi
+if [ ! -d /tmp/oilsand-buzz-src/deploy/compose ]; then
+  echo "[buzz] ERROR: deploy/compose missing from block/buzz clone" >&2
+  exit 1
+fi
+# Preserve secrets while updating compose/run.sh.
+sudo cp -a /tmp/oilsand-buzz-src/deploy/compose/compose.yml "$DIR"/compose.yml
+sudo cp -a /tmp/oilsand-buzz-src/deploy/compose/run.sh "$DIR"/run.sh 2>/dev/null || true
+for f in compose.caddy.yml compose.dev.yml Caddyfile README.md; do
+  [ -f "/tmp/oilsand-buzz-src/deploy/compose/$f" ] && sudo cp -a "/tmp/oilsand-buzz-src/deploy/compose/$f" "$DIR"/ || true
+done
 sudo chmod +x "$DIR/run.sh" 2>/dev/null || true
 
-sudo docker pull "$IMG" >/dev/null
+sudo docker pull "$IMG"
 
 # Owner keypair via buzz-admin generate-key (image has buzz-admin, NOT buzz-cli).
 # Output shape:
@@ -132,23 +135,21 @@ gen_owner() {
   OUT=$(sudo docker run --rm --entrypoint buzz-admin "$IMG" generate-key 2>&1 || true)
   OP_PK=$(printf '%%s\n' "$OUT" | sed -n 's/.*[Pp]ublic key:[[:space:]]*//p' | head -n1 | tr -d '[:space:]' | grep -oE '[0-9a-fA-F]{64}' | tr 'A-F' 'a-f' | head -n1 || true)
   OP_SK=$(printf '%%s\n' "$OUT" | sed -n 's/.*[Ss]ecret key:[[:space:]]*//p' | head -n1 | tr -d '[:space:]' || true)
-  # Secret may be hex or nsec1…; accept either.
   if ! printf '%%s' "$OP_SK" | grep -qE '^([0-9a-fA-F]{64}|nsec1[a-z0-9]+)$'; then
     OP_SK=""
   fi
   if [ -z "$OP_SK" ] || [ -z "$OP_PK" ]; then
-    echo "[buzz] WARNING: could not parse buzz-admin generate-key output; generating hex sk only" >&2
+    echo "[buzz] WARNING: could not parse buzz-admin generate-key; generating hex sk only" >&2
     printf '%%s\n' "$OUT" | tail -n 20 >&2 || true
     OP_SK=$(openssl rand -hex 32)
     OP_PK=""
   fi
 }
 
-# First-time secrets.
-if [ ! -f .env ]; then
-  echo "[buzz] writing .env (first-time secrets)…"
-  gen_owner
-  RELAY_SK=$(openssl rand -hex 32)
+write_env() {
+  # RELAY_OWNER_PUBKEY alone is enough for owner bootstrap.
+  # Do NOT set RELAY_OPERATOR_PUBKEYS without RELAY_OPERATOR_API_ORIGIN — the
+  # relay refuses to start (config error) and compose --wait reports unhealthy.
   {
     echo "BUZZ_IMAGE=$IMG"
     echo "BUZZ_DOMAIN=$HOST_AUTH"
@@ -158,34 +159,63 @@ if [ ! -f .env ]; then
     echo "BUZZ_CORS_ORIGINS=http://$HOST_AUTH,http://$IP:$PORT,http://127.0.0.1:$PORT"
     echo "BUZZ_REQUIRE_AUTH_TOKEN=false"
     echo "BUZZ_REQUIRE_RELAY_MEMBERSHIP=false"
-    echo "BUZZ_ALLOW_NIP_OA_AUTH=true"
+    echo "BUZZ_ALLOW_NIP_OA_AUTH=false"
     echo "BUZZ_AUTO_MIGRATE=true"
-    echo "BUZZ_GIT_CONFORMANCE_PROBE=true"
+    echo "BUZZ_GIT_CONFORMANCE_PROBE=false"
     echo "RUST_LOG=buzz_relay=info,buzz_db=info"
     echo "BUZZ_RELAY_PRIVATE_KEY=$RELAY_SK"
-    echo "BUZZ_GIT_HOOK_HMAC_SECRET=$(openssl rand -hex 32)"
+    echo "BUZZ_GIT_HOOK_HMAC_SECRET=$GIT_HMAC"
     echo "POSTGRES_DB=buzz"
     echo "POSTGRES_USER=buzz"
-    echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
-    echo "REDIS_PASSWORD=$(openssl rand -hex 16)"
-    echo "TYPESENSE_API_KEY=$(openssl rand -hex 16)"
-    echo "BUZZ_S3_ACCESS_KEY=$(openssl rand -hex 8)"
-    echo "BUZZ_S3_SECRET_KEY=$(openssl rand -hex 16)"
+    echo "POSTGRES_PASSWORD=$PG_PASS"
+    echo "REDIS_PASSWORD=$REDIS_PASS"
+    echo "BUZZ_S3_ACCESS_KEY=$S3_AK"
+    echo "BUZZ_S3_SECRET_KEY=$S3_SK"
     echo "BUZZ_S3_BUCKET=buzz-media"
+    echo "BUZZ_S3_ADDRESSING_STYLE=path"
     echo "BUZZ_HTTP_PORT=$PORT"
     if [ -n "$OP_PK" ]; then
       echo "RELAY_OWNER_PUBKEY=$OP_PK"
-      echo "RELAY_OPERATOR_PUBKEYS=$OP_PK"
     fi
   } | sudo tee .env >/dev/null
   sudo chmod 600 .env
+}
+
+# First-time secrets, or rewrite a broken .env that cannot start the relay.
+if [ ! -f .env ] || grep -Eq 'CHANGE_ME|RELAY_OPERATOR_PUBKEYS=' .env 2>/dev/null; then
+  if [ -f .env ] && grep -q 'RELAY_OPERATOR_PUBKEYS=' .env; then
+    echo "[buzz] fixing .env: RELAY_OPERATOR_PUBKEYS without API origin crashes the relay"
+  fi
+  echo "[buzz] writing .env…"
+  gen_owner
+  RELAY_SK=$(openssl rand -hex 32)
+  GIT_HMAC=$(openssl rand -hex 32)
+  PG_PASS=$(openssl rand -hex 16)
+  REDIS_PASS=$(openssl rand -hex 16)
+  S3_AK=$(openssl rand -hex 12)
+  S3_SK=$(openssl rand -hex 24)
+  # Preserve existing secrets when repairing operator-pubkeys crash.
+  if [ -f .env ]; then
+    prev() { sudo grep -E "^$1=" .env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '\r' || true; }
+    [ -n "$(prev BUZZ_RELAY_PRIVATE_KEY)" ] && RELAY_SK="$(prev BUZZ_RELAY_PRIVATE_KEY)"
+    [ -n "$(prev BUZZ_GIT_HOOK_HMAC_SECRET)" ] && GIT_HMAC="$(prev BUZZ_GIT_HOOK_HMAC_SECRET)"
+    [ -n "$(prev POSTGRES_PASSWORD)" ] && PG_PASS="$(prev POSTGRES_PASSWORD)"
+    [ -n "$(prev REDIS_PASSWORD)" ] && REDIS_PASS="$(prev REDIS_PASSWORD)"
+    [ -n "$(prev BUZZ_S3_ACCESS_KEY)" ] && S3_AK="$(prev BUZZ_S3_ACCESS_KEY)"
+    [ -n "$(prev BUZZ_S3_SECRET_KEY)" ] && S3_SK="$(prev BUZZ_S3_SECRET_KEY)"
+    [ -n "$(prev RELAY_OWNER_PUBKEY)" ] && OP_PK="$(prev RELAY_OWNER_PUBKEY)"
+    if [ -f operator.key ]; then OP_SK=$(sudo cat operator.key | tr -d '\r\n'); fi
+  fi
+  write_env
   printf '%%s\n' "$OP_SK" | sudo tee operator.key >/dev/null
   sudo chmod 600 operator.key
 else
-  echo "[buzz] updating community host in existing .env → $HOST_AUTH"
-  # Keep secrets; rewrite host-derived URLs so browser Host matches community.
+  echo "[buzz] updating host-derived URLs in existing .env → $HOST_AUTH"
   sudo cp .env .env.bak 2>/dev/null || true
+  # Drop operator pubkeys line if present (causes unhealthy without API origin).
   sudo sed -i \
+    -e '/^RELAY_OPERATOR_PUBKEYS=/d' \
+    -e '/^RELAY_OPERATOR_API_ORIGIN=/d' \
     -e "s|^BUZZ_DOMAIN=.*|BUZZ_DOMAIN=$HOST_AUTH|" \
     -e "s|^RELAY_URL=.*|RELAY_URL=ws://$HOST_AUTH|" \
     -e "s|^BUZZ_MEDIA_BASE_URL=.*|BUZZ_MEDIA_BASE_URL=http://$HOST_AUTH/media|" \
@@ -194,42 +224,62 @@ else
     -e "s|^BUZZ_REQUIRE_AUTH_TOKEN=.*|BUZZ_REQUIRE_AUTH_TOKEN=false|" \
     -e "s|^BUZZ_REQUIRE_RELAY_MEMBERSHIP=.*|BUZZ_REQUIRE_RELAY_MEMBERSHIP=false|" \
     -e "s|^BUZZ_AUTO_MIGRATE=.*|BUZZ_AUTO_MIGRATE=true|" \
+    -e "s|^BUZZ_GIT_CONFORMANCE_PROBE=.*|BUZZ_GIT_CONFORMANCE_PROBE=false|" \
     -e "s|^BUZZ_HTTP_PORT=.*|BUZZ_HTTP_PORT=$PORT|" \
     .env
-  # Ensure no leftover CHANGE_ME (run.sh refuses to start).
+  if ! grep -q '^BUZZ_S3_ADDRESSING_STYLE=' .env; then
+    echo 'BUZZ_S3_ADDRESSING_STYLE=path' | sudo tee -a .env >/dev/null
+  fi
   if grep -Eq 'CHANGE_ME' .env; then
-    echo "[buzz] ERROR: .env still has CHANGE_ME placeholders — remove $DIR/.env and redeploy" >&2
+    echo "[buzz] ERROR: .env still has CHANGE_ME — remove $DIR/.env and redeploy" >&2
     exit 1
   fi
 fi
 
-echo "[buzz] starting compose stack…"
-sudo BUZZ_COMPOSE_TLS=false ./run.sh start
+# Start without compose --wait first so we can print real logs if health fails.
+# run.sh start uses --wait and only reports "unhealthy" with no diagnostics.
+echo "[buzz] starting compose stack (detached)…"
+sudo docker compose --env-file .env -f compose.yml up -d
 
-# Wait for liveness.
+echo "[buzz] waiting for postgres/redis/minio/relay…"
 ok=0
-for _ in $(seq 1 90); do
+for i in $(seq 1 120); do
   if curl -fsS "http://127.0.0.1:$PORT/_liveness" >/dev/null 2>&1; then ok=1; break; fi
-  if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then ok=1; break; fi
+  # Also accept readiness via published app port if liveness path differs.
+  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/_readiness" >/dev/null 2>&1; then ok=1; break; fi
+  if [ $((i %% 15)) -eq 0 ]; then
+    echo "[buzz] still waiting… ($i/120) relay state:"
+    sudo docker compose --env-file .env -f compose.yml ps >&2 || true
+  fi
   sleep 2
 done
 if [ "$ok" -ne 1 ]; then
-  echo "[buzz] ERROR: relay not live on :$PORT" >&2
-  sudo docker compose --env-file .env -f compose.yml ps >&2 || true
-  sudo docker compose --env-file .env -f compose.yml logs --tail 80 relay >&2 || true
+  echo "[buzz] ERROR: relay never became live on :$PORT" >&2
+  sudo docker compose --env-file .env -f compose.yml ps -a >&2 || true
+  echo "[buzz] --- relay logs ---" >&2
+  sudo docker compose --env-file .env -f compose.yml logs --tail 120 relay >&2 || true
+  echo "[buzz] --- postgres logs ---" >&2
+  sudo docker compose --env-file .env -f compose.yml logs --tail 40 postgres >&2 || true
+  echo "[buzz] --- minio logs ---" >&2
+  sudo docker compose --env-file .env -f compose.yml logs --tail 40 minio >&2 || true
   exit 1
 fi
 
-# Restart relay so ensure_configured_community runs with the rewritten RELAY_URL.
-echo "[buzz] restarting relay to seed community for host $HOST_AUTH…"
-sudo BUZZ_COMPOSE_TLS=false ./run.sh restart || sudo docker compose --env-file .env -f compose.yml up -d --force-recreate relay
-sleep 8
+# Recreate relay once so ensure_configured_community sees final RELAY_URL.
+echo "[buzz] recreating relay to seed community for $HOST_AUTH…"
+sudo docker compose --env-file .env -f compose.yml up -d --force-recreate --no-deps relay
+ok=0
+for i in $(seq 1 60); do
+  if curl -fsS "http://127.0.0.1:$PORT/_liveness" >/dev/null 2>&1; then ok=1; break; fi
+  sleep 2
+done
+if [ "$ok" -ne 1 ]; then
+  echo "[buzz] ERROR: relay unhealthy after recreate" >&2
+  sudo docker compose --env-file .env -f compose.yml logs --tail 120 relay >&2 || true
+  exit 1
+fi
 
-# Belt-and-suspenders: insert community host rows directly in Postgres for every
-# Host header clients actually send (IP:port, bare IP, localhost variants).
-# ensure_configured_community does the same INSERT; this covers cases where
-# startup seed was skipped (empty authority / migrate race).
-echo "[buzz] ensuring communities.host rows for client Host headers…"
+echo "[buzz] ensuring communities.host rows…"
 set -a
 # shellcheck disable=SC1091
 . ./.env 2>/dev/null || true
@@ -245,7 +295,7 @@ seed_host() {
     -c "INSERT INTO communities (host) VALUES ('$h') ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host;" \
     >/dev/null 2>&1 \
     && echo "[buzz] community host ok: $h" \
-    || echo "[buzz] WARNING: could not upsert communities.host=$h (migrations may still be running)" >&2
+    || echo "[buzz] WARNING: could not upsert communities.host=$h" >&2
 }
 seed_host "$HOST_AUTH"
 seed_host "$IP"
@@ -264,10 +314,9 @@ if [ -z "$CHAN_ID" ]; then
 fi
 
 echo "[buzz] ready"
-echo "[buzz] desktop/browser Relay URL must be exactly:  ws://$HOST_AUTH"
+echo "[buzz] desktop/browser Relay URL:  ws://$HOST_AUTH"
 echo "[buzz] web UI:  http://$IP:$PORT"
-echo "[buzz] if you still see 'no community', wipe volumes once and redeploy:"
-echo "[buzz]   cd $DIR && sudo docker compose --env-file .env -f compose.yml down -v && sudo rm -f .env && re-run ctrl+d"
+echo "[buzz] if still broken: cd $DIR && sudo docker compose --env-file .env -f compose.yml down -v && sudo rm -f .env"
 echo "OILSAND_BUZZ_OPERATOR_KEY $(sudo cat operator.key | tr -d '\r\n')"
 echo "OILSAND_BUZZ_CHANNEL_ID $(sudo cat channel.id 2>/dev/null | tr -d '\r\n')"
 `, buzzInstallDir, buzzImage, shSingle(ip), buzzHTTPPort, buzzChannelName))

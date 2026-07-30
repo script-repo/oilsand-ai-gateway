@@ -14,23 +14,30 @@ func TestBuzzDeployScript(t *testing.T) {
 		"ghcr.io/block/buzz:main",
 		"BUZZ_REQUIRE_AUTH_TOKEN=false",
 		"BUZZ_AUTO_MIGRATE=true",
-		"./run.sh start",
+		"docker compose --env-file .env -f compose.yml up -d",
 		"_liveness",
 		"OILSAND_BUZZ_OPERATOR_KEY",
 		"oilsand", // default channel name
 		"ensuring Docker",
-		"ensuring git, openssl, curl", // bare gateway images lack these
+		"ensuring git, openssl, curl",
 		"git clone",
 		"ERROR: git still missing",
-		"HOST_AUTH=",               // community tenancy host = IP:port
-		"RELAY_URL=ws://",          // seeds ensure_configured_community
-		"buzz-admin",               // generate-key for owner pubkey
-		"INSERT INTO communities",  // direct Postgres host seed
-		"no community",             // operator hint when UI mismatches host
+		"HOST_AUTH=",
+		"RELAY_URL=ws://",
+		"buzz-admin",
+		"INSERT INTO communities",
+		"BUZZ_S3_ADDRESSING_STYLE=path",
+		// Must not set operator pubkeys without API origin (relay crash → unhealthy).
+		"Do NOT set RELAY_OPERATOR_PUBKEYS",
+		"relay logs",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("deploy script missing %q", want)
 		}
+	}
+	// Guard the config crash that made compose --wait report "unhealthy".
+	if strings.Contains(s, "echo \"RELAY_OPERATOR_PUBKEYS=$OP_PK\"") {
+		t.Error("must not set RELAY_OPERATOR_PUBKEYS without RELAY_OPERATOR_API_ORIGIN")
 	}
 }
 
